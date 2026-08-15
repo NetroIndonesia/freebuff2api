@@ -1,0 +1,12 @@
+{
+  "tokens": [
+    "your-freebuff-token-1",
+    "your-freebuff-token-2:optional-user-id"
+  ],
+  "proxies": [
+    "http://127.0.0.1:7890",
+    "socks5h://user:pass@host:1080"
+  ],
+  "debug": false,
+  "rotation": "pin"
+}

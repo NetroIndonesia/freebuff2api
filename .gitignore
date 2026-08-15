@@ -1,0 +1,27 @@
+# dependencies
+node_modules/
+
+# secrets — never commit
+config.json
+.env
+.env.local
+credentials/
+proxies.txt
+scripts/accounts.txt
+scripts/proxy.txt
+
+# sqlite database (holds account tokens)
+data.db
+data.db-shm
+data.db-wal
+*.db
+*.db-wal
+*.db-shm
+
+# logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
