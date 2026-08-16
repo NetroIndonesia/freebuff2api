@@ -341,16 +341,24 @@ async function handleModels(res) {
 
 function handleSessions(res) {
   const sessions = internals.sessions();
+  const now = Date.now();
   json(res, {
-    sessions: sessions.map((s) => ({
-      key: s.key,
-      token: mask(s.token),
-      model: s.model,
-      instanceId: s.instanceId,
-      remainingMs: s.remainingMs,
-      expiresAt: s.expiresAt,
-      usable: typeof s.remainingMs === 'number' && s.remainingMs > 60000,
-    })),
+    sessions: sessions.map((s) => {
+      // Recompute remaining from expiresAt (cached remainingMs is frozen at
+      // creation time, so it would keep showing "active" after expiry).
+      const expMs = Date.parse(s.expiresAt || "");
+      const remainingMs = Number.isFinite(expMs) ? Math.max(0, expMs - now) : (s.remainingMs ?? 0);
+      const usable = Number.isFinite(expMs) ? expMs > now + 60000 : (typeof s.remainingMs === 'number' && s.remainingMs > 60000);
+      return {
+        key: s.key,
+        token: mask(s.token),
+        model: s.model,
+        instanceId: s.instanceId,
+        remainingMs,
+        expiresAt: s.expiresAt,
+        usable,
+      };
+    }),
   });
 }
 

@@ -59,13 +59,13 @@ const STATE_CLASS = {
   ok: 'ok', active: 'ok', ready: 'ok',
   banned: 'err', country_blocked: 'err', token_invalid: 'err', blocked: 'err',
   rate_limited: 'warn', model_locked: 'warn', ip_capped: 'warn',
-  unknown: 'neutral', cooldown: 'info', expiring: 'warn',
+  unknown: 'neutral', cooldown: 'info', expiring: 'warn', expired: 'neutral',
 };
 const STATE_LABEL = {
   ok: 'ok', active: 'active', ready: 'ready',
   banned: 'banned', country_blocked: 'blocked', token_invalid: 'invalid', blocked: 'blocked',
   rate_limited: 'ratelimit', model_locked: 'model lock', ip_capped: 'ip capped',
-  unknown: 'unknown', cooldown: 'cooling', expiring: 'expiring',
+  unknown: 'unknown', cooldown: 'cooling', expiring: 'expiring', expired: 'expired',
 };
 function pill(state, extraLabel) {
   const cls = STATE_CLASS[state] || 'neutral';
@@ -206,7 +206,7 @@ async function renderSessions() {
       <td class="mono">${esc(s.model)}</td>
       <td class="mono">${s.remainingMs != null ? fmtDur(s.remainingMs) : '—'}</td>
       <td class="mono">${s.expiresAt ? fmtClock(s.expiresAt) : '—'}</td>
-      <td>${pill(s.usable ? 'active' : 'expiring')}</td>
+      <td>${s.usable ? pill('active') : (s.remainingMs != null && s.remainingMs <= 0 ? pill('expired') : pill('expiring'))}</td>
       <td><button class="btn btn-sm btn-danger" data-del-session="${esc(s.key)}">del</button></td>
     </tr>`).join('') || '<tr><td colspan="6" class="empty">no active sessions</td></tr>';
   $$('#sessions-table [data-del-session]').forEach((b) => b.addEventListener('click', async () => {

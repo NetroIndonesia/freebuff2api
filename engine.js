@@ -2373,16 +2373,14 @@ async function responsesToNonStream(upstreamBody, mc) {
 function cleanCache() {
   const now = Date.now();
   try {
-    if (sessCache.size > 50) {
-      for (const [k, v] of sessCache) {
-        const exp = v.expiresAt ? new Date(v.expiresAt).getTime() : 0;
-        if (exp > 0 && exp < now) sessCache.delete(k);
-      }
+    // Always prune expired sessions. cached remainingMs is frozen at creation, so
+    // expired entries would otherwise linger and show as "active" in the dashboard.
+    for (const [k, v] of sessCache) {
+      const exp = v.expiresAt ? new Date(v.expiresAt).getTime() : 0;
+      if (exp > 0 && exp < now) sessCache.delete(k);
     }
-    if (runCache.size > 50) {
-      for (const [k, v] of runCache) {
-        if (now - v.ts > RUN_CACHE_TTL_MS) runCache.delete(k);
-      }
+    for (const [k, v] of runCache) {
+      if (now - v.ts > RUN_CACHE_TTL_MS) runCache.delete(k);
     }
   } catch {}
 }
