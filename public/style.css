@@ -237,7 +237,8 @@ body {
 .msg.user .avatar { background: var(--amber); border-color: var(--amber); color: #141006; }
 .msg .bubble {
   background: var(--panel-2); border: 1px solid var(--border);
-  padding: 9px 13px; white-space: pre-wrap; word-break: break-word;
+  padding: 7px 11px; white-space: pre-wrap; word-break: break-word;
+  font-size: 12px; line-height: 1.5;
 }
 .msg.user .bubble { background: #1c1a12; border-color: rgba(242,163,60,.25); }
 .msg .role { font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: .07em; margin-bottom: 4px; }
