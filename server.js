@@ -102,11 +102,26 @@ let state = {
   debug: store.getSetting('debug', 'false') === 'true',
   rotation: store.getSetting('rotation', 'pin'),
   sessionRotateEvery: parseInt(store.getSetting('sessionRotateEvery', '0'), 10) || 0,
+  proxyAutoRefresh: store.getSetting('proxyAutoRefresh', 'false') === 'true',
 };
 
-// Active accounts only — the engine rotates through these.
+// Active accounts only — shown in settings/status. Banned accounts stay listed
+// here so the operator can inspect/delete them, but are excluded from rotation.
 function activeTokenList() {
   return state.accounts.filter((a) => a.active).map((a) => (a.uid ? `${a.token}:${a.uid}` : a.token));
+}
+
+// Banned = manual override or upstream-observed ban.
+function isAccountBanned(a) {
+  if (a.state === 'banned') return true;
+  return internals.accountHealth()[a.token]?.state === 'banned';
+}
+
+// Accounts the engine may rotate through: active and not banned.
+function rotationTokenList() {
+  return state.accounts
+    .filter((a) => a.active && !isAccountBanned(a))
+    .map((a) => (a.uid ? `${a.token}:${a.uid}` : a.token));
 }
 
 function persistSettings() {
@@ -114,6 +129,7 @@ function persistSettings() {
   store.setSetting('debug', String(state.debug));
   store.setSetting('rotation', state.rotation);
   store.setSetting('sessionRotateEvery', String(state.sessionRotateEvery));
+  store.setSetting('proxyAutoRefresh', String(state.proxyAutoRefresh));
   store.setSetting('proxies', JSON.stringify(state.proxies));
 }
 
@@ -140,7 +156,7 @@ function slotToken(slot) {
 }
 
 const env = {
-  get FREEBUFF_TOKEN() { return activeTokenList().join(','); },
+  get FREEBUFF_TOKEN() { return rotationTokenList().join(','); },
   get API_KEY() { return state.apiKey; },
   get FREEBUFF_API_KEY() { return state.apiKey; },
   get FREEBUFF_DEBUG() { return String(state.debug); },
@@ -191,8 +207,9 @@ globalThis.fetch = function proxiedFetch(input, init = {}) {
     (err) => {
       pool.reportFailure(entry.key);
       if (!isReplayableBody(init.body)) throw err;
-      // fall back to auto-rotation (not the same bound proxy) or direct
-      const next = bound ? pool.next() : pool.next();
+      // Fall back to auto-rotation (reportFailure already cooled the failed
+      // proxy, so pool.next() skips it when others exist) or a direct connection.
+      const next = pool.next();
       if (next) {
         const t1 = Date.now();
         return attempt(next.dispatcher).then(
@@ -381,12 +398,12 @@ function handleRemoveProxy(res, body) {
   json(res, { ok: removed });
 }
 
-async function handleTestProxy(res, body) {
-  const url = String(body.url || '').trim();
-  if (!url) return json(res, { ok: false, error: 'url required' }, 400);
+async function testProxy(url) {
+  const key = canonProxy(url);
+  if (!key) return { ok: false, error: 'invalid proxy URL' };
+  const { Agent } = await import('undici');
+  const agent = new Agent({ connect: makeProxyConnector(key), pipelining: 0 });
   try {
-    const { Agent } = await import('undici');
-    const agent = new Agent({ connect: makeProxyConnector(url), pipelining: 0 });
     const t0 = Date.now();
     const r = await baseFetch('https://www.codebuff.com/api/v1/me', {
       method: 'GET',
@@ -394,11 +411,37 @@ async function handleTestProxy(res, body) {
       signal: AbortSignal.timeout(12000),
     });
     await r.text().catch(() => {});
-    const latencyMs = Date.now() - t0;
-    agent.destroy();
-    json(res, { ok: true, latencyMs, status: r.status });
+    return { ok: true, latencyMs: Date.now() - t0, status: r.status };
   } catch (e) {
-    json(res, { ok: false, error: e.message });
+    return { ok: false, error: e.message };
+  } finally {
+    agent.destroy();
+  }
+}
+
+async function handleTestProxy(res, body) {
+  const url = String(body.url || '').trim();
+  if (!url) return json(res, { ok: false, error: 'url required' }, 400);
+  json(res, await testProxy(url));
+}
+
+// Background proxy health re-test: when enabled, periodically probes each proxy
+// and updates pool cooldown/latency without touching the request path.
+let proxyRefreshing = false;
+const PROXY_REFRESH_MS = parseInt(process.env.PROXY_REFRESH_MS || '60000', 10) || 60000;
+async function refreshProxiesBackground() {
+  if (!state.proxyAutoRefresh || proxyRefreshing || state.proxies.length === 0) return;
+  proxyRefreshing = true;
+  try {
+    for (const p of state.proxies) {
+      const key = canonProxy(p);
+      if (!key) continue;
+      const r = await testProxy(key);
+      if (r.ok) pool.reportSuccess(key, r.latencyMs);
+      else pool.reportFailure(key);
+    }
+  } catch {} finally {
+    proxyRefreshing = false;
   }
 }
 
@@ -579,6 +622,7 @@ function handleConfig(res) {
     debug: state.debug,
     rotation: state.rotation,
     sessionRotateEvery: state.sessionRotateEvery,
+    proxyAutoRefresh: state.proxyAutoRefresh,
   });
 }
 
@@ -604,13 +648,23 @@ function handleUpdateConfig(res, body) {
   if (typeof body.sessionRotateEvery === 'number' || typeof body.sessionRotateEvery === 'string') {
     state.sessionRotateEvery = Math.max(0, parseInt(String(body.sessionRotateEvery), 10) || 0);
   }
+  if (typeof body.proxyAutoRefresh === 'boolean') state.proxyAutoRefresh = body.proxyAutoRefresh;
   if (Array.isArray(body.proxies)) {
     pool.clear();
     state.proxies = [];
-    for (const p of body.proxies) if (pool.add(String(p).trim())) state.proxies.push(String(p).trim());
+    for (const p of body.proxies) {
+      const key = canonProxy(p);
+      if (key && pool.add(key)) state.proxies.push(key);
+    }
+    // Re-apply per-account proxy bindings (pool.clear() wipes them); drop
+    // bindings whose proxy is no longer in the list.
+    for (const a of state.accounts) {
+      if (a.proxy && !pool.setBinding(a.token, a.proxy)) store.setAccountProxy(a.token, null);
+    }
+    reloadAccounts();
   }
   persistSettings();
-  json(res, { ok: true, accounts: state.accounts.length, proxies: state.proxies.length, apiKey: mask(state.apiKey), rotation: state.rotation, sessionRotateEvery: state.sessionRotateEvery });
+  json(res, { ok: true, accounts: state.accounts.length, proxies: state.proxies.length, apiKey: mask(state.apiKey), rotation: state.rotation, sessionRotateEvery: state.sessionRotateEvery, proxyAutoRefresh: state.proxyAutoRefresh });
 }
 
 // ----------------------------------------------------------------- static ----
@@ -753,4 +807,5 @@ server.listen(port, host, () => {
   // /api/quota never blocks (matters with hundreds of accounts).
   refreshQuotaBackground();
   setInterval(refreshQuotaBackground, QUOTA_REFRESH_MS);
+  setInterval(refreshProxiesBackground, PROXY_REFRESH_MS);
 });

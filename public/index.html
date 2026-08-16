@@ -122,9 +122,9 @@
                     <span>System prompt</span>
                     <input id="chat-system" type="text" value="You are a helpful assistant." />
                   </label>
-                  <label class="checkbox-field"><input type="checkbox" id="chat-stream" checked /><span>stream</span></label>
-                  <label class="checkbox-field"><input type="checkbox" id="chat-new-session" /><span>new session</span></label>
-                  <label class="checkbox-field"><input type="checkbox" id="chat-roundrobin" /><span>round-robin</span></label>
+                  <label class="switch"><input type="checkbox" id="chat-stream" checked /><span class="switch-track"><span class="switch-thumb"></span></span><span class="switch-label">stream</span></label>
+                  <label class="switch"><input type="checkbox" id="chat-new-session" /><span class="switch-track"><span class="switch-thumb"></span></span><span class="switch-label">new session</span></label>
+                  <label class="switch"><input type="checkbox" id="chat-roundrobin" /><span class="switch-track"><span class="switch-thumb"></span></span><span class="switch-label">round-robin</span></label>
                 </div>
                 <button class="btn btn-primary" id="chat-send">send →</button>
               </div>
@@ -171,6 +171,7 @@
               <input id="proxy-url" type="text" placeholder="http://host:port or socks5://…" class="input-sm" />
               <button class="btn btn-sm" id="proxy-add">+ add</button>
               <button class="btn btn-sm" id="proxy-rotate">↻ rotate</button>
+              <label class="switch"><input type="checkbox" id="proxy-auto-refresh" /><span class="switch-track"><span class="switch-thumb"></span></span><span class="switch-label">auto refresh</span></label>
             </div>
           </div>
           <table class="table">
@@ -189,7 +190,7 @@
               <span class="muted" id="accounts-count"></span>
               <button class="btn btn-sm" id="account-rotate">↻ rotate</button>
               <button class="btn btn-sm" id="account-auto-proxy" title="auto-bind proxies to accounts round-robin">⇄ auto proxy</button>
-              <button class="btn btn-sm btn-danger" id="account-delete-banned" title="delete all banned accounts">✕ del banned</button>
+              <button class="btn btn-sm btn-danger" id="account-delete-banned" title="delete all banned accounts" hidden>✕ del banned</button>
               <button class="btn btn-sm" id="account-add-btn">+ add account</button>
             </div>
           </div>
@@ -217,20 +218,19 @@
               <span>Proxies (one per line)</span>
               <textarea id="cfg-proxies" rows="5" placeholder="http://host:port&#10;socks5h://user:pass@host:port"></textarea>
             </label>
-            <label class="field">
-              <span>Session rotation</span>
-              <select id="cfg-rotation">
-                <option value="pin">pin (reuse session)</option>
-                <option value="roundrobin">round-robin (spread across accounts)</option>
-              </select>
+            <label class="switch">
+              <input type="checkbox" id="cfg-rotation" />
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-label">round-robin rotation <small class="muted">(spread requests across accounts; off = pin/reuse session)</small></span>
             </label>
             <label class="field">
               <span>Rotate session every N requests (0 = off)</span>
               <input id="cfg-session-rotate" type="number" min="0" value="0" />
             </label>
-            <label class="checkbox-field">
+            <label class="switch">
               <input type="checkbox" id="cfg-debug" />
-              <span>debug logging</span>
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-label">debug logging</span>
             </label>
             <div class="settings-actions">
               <button class="btn btn-primary" id="cfg-save">save configuration</button>

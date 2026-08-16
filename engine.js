@@ -1580,12 +1580,21 @@ async function executeChat(env, chatParams, mc, isStream, mode, pinSlot = null, 
 // ---------------------------------------------------------------------------
 // Anthropic Messages API (local adapter, reuses stable executeChat main path)
 // ---------------------------------------------------------------------------
-function anthropicModelToOpenAI(model) {
+// Resolve an Anthropic model name to a model config, refreshing the dynamic
+// registry on first use (matches chat/responses behavior). Supports exact ids,
+// "anthropic/…" prefixes, and short suffixes across the merged model table.
+async function resolveAnthropicModelConfig(model) {
   const raw = String(model || DEFAULT_MODEL).trim();
-  if (findModelConfig(raw)) return raw;
+  let mc = await resolveModelConfig(raw);
+  if (mc) return mc;
   const short = raw.replace(/^anthropic\//, "");
-  const hit = MODELS.find((m) => m.id.toLowerCase().endsWith("/" + short.toLowerCase()));
-  return hit ? hit.id : DEFAULT_MODEL;
+  if (short !== raw) {
+    mc = await resolveModelConfig(short);
+    if (mc) return mc;
+  }
+  const merged = [...MODELS, ...(dynamicModelsCache.models || [])];
+  const hit = merged.find((m) => m.id.toLowerCase().endsWith("/" + short.toLowerCase()));
+  return hit || (await resolveModelConfig(DEFAULT_MODEL));
 }
 
 function anthropicText(content) {
@@ -1690,8 +1699,7 @@ function estimateAnthropicTokens(value) {
 async function handleAnthropicCountTokens(request, env) {
   let body;
   try { body = await request.json(); } catch { return anthropicError("Invalid JSON", "invalid_request_error", 400); }
-  const openaiModel = anthropicModelToOpenAI(body.model);
-  const mc = findModelConfig(openaiModel);
+  const mc = await resolveAnthropicModelConfig(body.model);
   if (!mc) return anthropicError("Model not available: " + (body.model || ""), "invalid_request_error", 400);
   const chat = anthropicToChat(body, mc);
   return jsonResponse({ input_tokens: Math.max(1, Math.ceil(estimateAnthropicTokens(chat.messages) / 4)) }, 200);
@@ -1745,8 +1753,7 @@ function anthropicStream(mc) {
 async function handleAnthropicMessages(request, env) {
   let body;
   try { body = await request.json(); } catch { return anthropicError("Invalid JSON", "invalid_request_error", 400); }
-  const openaiModel = anthropicModelToOpenAI(body.model);
-  const mc = findModelConfig(openaiModel);
+  const mc = await resolveAnthropicModelConfig(body.model);
   if (!mc) return anthropicError("Model not available: " + (body.model || ""), "invalid_request_error", 400);
   const chat = anthropicToChat(body, mc);
   const response = await executeChat(env, chat, mc, !!chat.stream, "chat");

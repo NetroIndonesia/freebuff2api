@@ -7,8 +7,6 @@ config.json
 .env.local
 credentials/
 proxies.txt
-scripts/accounts.txt
-scripts/proxy.txt
 
 # sqlite database (holds account tokens)
 data.db

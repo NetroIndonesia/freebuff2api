@@ -66,9 +66,7 @@ export function makeProxyConnector(proxyUrl) {
         cb(chunk);
       }
     });
-    socket.on('error', (e) => {
-      if (waiter) { const cb = waiter.cb; waiter = null; cb = null; return done(e); }
-    });
+    socket.on('error', (e) => done(e));
 
     const readN = (n, cb) => {
       if (buf.length >= n) {
@@ -244,7 +242,7 @@ export class ProxyPool {
     if (typeof latencyMs === 'number') e.latencyMs = latencyMs;
   }
 
-  // Exponential backoff: 2s, 8s, 32s… capped at 5min. After 3 fails the proxy is skipped.
+  // Exponential backoff: 2s, 8s, 32s… capped at 5min.
   reportFailure(key) {
     const e = this.entries.get(key);
     if (!e) return;

@@ -78,7 +78,7 @@ export async function scanQuota(accounts, concurrency = 3) {
 
   return {
     models: ordered,
-    premium: PREMIUM,
+    premium: [...PREMIUM],
     accounts: results.map((r) => ({
       token: r.token,
       uid: r.uid,

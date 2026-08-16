@@ -256,12 +256,24 @@ async function testProxy(url) {
   await renderProxies();
 }
 
+let proxyRefreshTimer = null;
+function startProxyAutoRefresh() {
+  stopProxyAutoRefresh();
+  proxyRefreshTimer = setInterval(async () => { try { await renderProxies(); } catch {} }, 10000);
+}
+function stopProxyAutoRefresh() {
+  if (proxyRefreshTimer) { clearInterval(proxyRefreshTimer); proxyRefreshTimer = null; }
+}
+
 // ---------------------------------------------------------------- accounts
 
 async function renderAccounts() {
   const { accounts } = await getAccounts();
   state.accounts = accounts;
   $('#accounts-count').textContent = `${accounts.length} accounts`;
+  const bannedCount = accounts.filter((a) => a.state === 'banned').length;
+  const delBtn = $('#account-delete-banned');
+  if (delBtn) { delBtn.hidden = bannedCount === 0; delBtn.textContent = bannedCount ? `✕ del banned (${bannedCount})` : '✕ del banned'; }
   $('#accounts-table').innerHTML = accounts.map((a) => {
     const cooling = a.cooldownUntil && a.cooldownUntil > Date.now();
     const cooldownCell = cooling ? pill('cooldown', fmtDur(a.cooldownUntil - Date.now())) : '<span class="muted">—</span>';
@@ -341,7 +353,8 @@ async function loadSettings() {
   if (cfg.tokens) $('#cfg-tokens').value = cfg.tokens.join('\n');
   if (cfg.proxies) $('#cfg-proxies').value = cfg.proxies.join('\n');
   $('#cfg-debug').checked = !!cfg.debug;
-  $('#cfg-rotation').value = cfg.rotation === 'roundrobin' ? 'roundrobin' : 'pin';
+  $('#cfg-rotation').checked = cfg.rotation === 'roundrobin';
+  $('#cfg-session-rotate').value = cfg.sessionRotateEvery ?? 0;
 }
 async function saveSettings() {
   const tokens = $('#cfg-tokens').value.split(/\n/).map((t) => t.trim()).filter(Boolean);
@@ -349,9 +362,9 @@ async function saveSettings() {
   const key = $('#cfg-apikey').value.trim();
   if (key) localStorage.setItem('freebuffApiKey', key);
   try {
-    const r = await api('/api/config', { method: 'POST', body: JSON.stringify({ tokens, proxies, debug: $('#cfg-debug').checked, rotation: $('#cfg-rotation').value }) });
-    $('#cfg-status').textContent = `saved · ${r.tokens} tokens, ${r.proxies} proxies · rotation ${r.rotation}`;
-    logActivity(`config saved: ${r.tokens} tokens, ${r.proxies} proxies, rotation ${r.rotation}`);
+    const r = await api('/api/config', { method: 'POST', body: JSON.stringify({ tokens, proxies, debug: $('#cfg-debug').checked, rotation: $('#cfg-rotation').checked ? 'roundrobin' : 'pin', sessionRotateEvery: parseInt($('#cfg-session-rotate').value, 10) || 0 }) });
+    $('#cfg-status').textContent = `saved · ${r.accounts} accounts, ${r.proxies} proxies · rotation ${r.rotation}`;
+    logActivity(`config saved: ${r.accounts} accounts, ${r.proxies} proxies, rotation ${r.rotation}`);
   } catch (e) { $('#cfg-status').textContent = `error: ${e.message}`; logActivity(`config save failed: ${e.message}`, 'err'); }
 }
 
@@ -540,6 +553,14 @@ function wireEvents() {
   $('#accounts-select-all').addEventListener('change', (e) => {
     $$('#accounts-table .acct-chk').forEach((c) => { c.checked = e.target.checked; });
   });
+  $('#proxy-auto-refresh').addEventListener('change', async (e) => {
+    const on = e.target.checked;
+    try {
+      await api('/api/config', { method: 'POST', body: JSON.stringify({ proxyAutoRefresh: on }) });
+      logActivity(`proxy auto-refresh ${on ? 'enabled' : 'disabled'}`);
+      if (on) startProxyAutoRefresh(); else stopProxyAutoRefresh();
+    } catch (err) { logActivity(`proxy auto-refresh toggle failed: ${err.message}`, 'err'); e.target.checked = !on; }
+  });
   $('#cfg-save').addEventListener('click', saveSettings);
 }
 
@@ -574,6 +595,12 @@ async function boot() {
   wireEvents();
   setupLoginGate();
   await refreshAll();
+  // Init proxy auto-refresh toggle from config.
+  try {
+    const cfg = await api('/api/config').catch(() => ({}));
+    const t = $('#proxy-auto-refresh');
+    if (t) { t.checked = !!cfg.proxyAutoRefresh; if (cfg.proxyAutoRefresh) startProxyAutoRefresh(); }
+  } catch {}
   setInterval(() => { renderOverview().catch(() => {}); }, 10000);
   logActivity('dashboard connected');
 }

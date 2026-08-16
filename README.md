@@ -89,15 +89,8 @@ engine.js        gateway engine (OpenAI/Anthropic routes, session/model lifecycl
 proxy.js         proxy pool + CONNECT/SOCKS tunneling connectors
 quota.js         per-account quota scanner
 public/          dashboard (index.html, style.css, app.js, icon.png)
-scripts/         account automation helpers
 config.example.json  example config
 ```
-
-## Account automation
-
-`scripts/register.js` automates Google/GSuite account registration and writes the
-resulting Freebuff tokens straight into `config.json` (the dashboard account pool).
-See `scripts/README.md` for usage.
 
 ## Notes
 
