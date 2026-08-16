@@ -2209,6 +2209,7 @@ export const internals = {
   accountHealth: () => Object.fromEntries(acctHealth),
   cooldowns: () => Object.fromEntries(cooldowns),
   cooldown: (token, ms) => cooldown(token, ms),
+  modelTableCached: () => mergeModelTables(MODELS, dynamicModelsCache.models || []),
   modelTable: async () => {
     try {
       const dyn = await refreshDynamicModelsIfStale();

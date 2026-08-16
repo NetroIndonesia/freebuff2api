@@ -48,6 +48,7 @@ export function makeProxyConnector(proxyUrl) {
     const done = (err) => {
       socket.removeAllListeners();
       if (err) { socket.destroy(); return callback(err); }
+      if (buf.length) socket.unshift(buf);
       wrapTls(socket, options, callback);
     };
     const fail = (msg) => done(new Error(`socks proxy error: ${msg}`));

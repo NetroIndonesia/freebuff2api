@@ -214,7 +214,7 @@ globalThis.fetch = function proxiedFetch(input, init = {}) {
         const t1 = Date.now();
         return attempt(next.dispatcher).then(
           (res) => { pool.reportSuccess(next.key, Date.now() - t1); return res; },
-          () => nativeFetch(input, init),
+          (err) => { pool.reportFailure(next.key); return nativeFetch(input, init); },
         );
       }
       return nativeFetch(input, init);
@@ -278,7 +278,7 @@ async function handleStatus(res) {
   }
   const proxies = pool.list();
   const sessions = internals.sessions();
-  const models = await internals.modelTable().catch(() => []);
+  const models = internals.modelTableCached();
   json(res, {
     service: 'freebuff2api',
     version: '2.0.0',
@@ -738,7 +738,14 @@ const server = createServer(async (nodeReq, res) => {
     const body = nodeReq.method === 'POST' || nodeReq.method === 'DELETE'
       ? safeParse(rawBody)
       : {};
-    return routeManagement(pathname, nodeReq.method, res, body);
+    try {
+      await routeManagement(pathname, nodeReq.method, res, body);
+    } catch (err) {
+      console.error('[server] management error:', err?.message || err);
+      if (!res.headersSent) json(res, { error: 'internal error', type: 'internal_error' }, 500);
+      else if (!res.writableEnded) res.end();
+    }
+    return;
   }
 
   // --- static dashboard ---

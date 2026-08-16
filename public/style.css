@@ -203,9 +203,9 @@ body {
 .log-line.err .ev { color: var(--red); }
 
 /* ============================ playground ============================ */
-.playground { display: flex; flex-direction: column; height: calc(100vh - 120px); min-height: 520px; }
-.playground-chat { flex: 1; display: flex; flex-direction: column; height: 100%; }
-.chat-messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 13px; padding-right: 6px; margin-bottom: 13px; }
+.playground { display: flex; flex-direction: column; height: calc(100vh - 170px); min-height: 400px; max-height: 760px; }
+.playground-chat { flex: 1; display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.chat-messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 13px; padding-right: 6px; margin-bottom: 13px; min-height: 0; }
 .msg { display: flex; gap: 10px; max-width: 88%; }
 .msg.user { align-self: flex-end; flex-direction: row-reverse; }
 .msg .avatar {
@@ -230,7 +230,11 @@ body {
 }
 .chat-compose textarea:focus { border-color: var(--amber); }
 .chat-controls { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-top: 10px; flex-wrap: wrap; }
-.chat-options { display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap; }
+.chat-options { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; flex: 1 1 320px; min-width: 0; }
+.chat-options .field input, .chat-options .field select { min-width: 0; }
+#chat-model { width: 180px; }
+#chat-account { width: 130px; }
+.chat-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
 /* ============================ forms ============================ */
 .field { display: flex; flex-direction: column; gap: 5px; }

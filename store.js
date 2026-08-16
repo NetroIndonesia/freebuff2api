@@ -1,13 +1,13 @@
-// store.js — SQLite persistence (node:sqlite, built-in). Holds accounts with
+// store.js — SQLite persistence (better-sqlite3). Holds accounts with
 // per-account metadata (active/inactive, proxy binding, manual state override),
 // settings, and the background quota cache.
 
-import { DatabaseSync } from 'node:sqlite';
+import Database from 'better-sqlite3';
 
 let db = null;
 
 export function initStore(path) {
-  db = new DatabaseSync(path);
+  db = new Database(path);
   db.exec(`PRAGMA journal_mode = WAL;`);
   db.exec(`CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -20,11 +20,6 @@ export function initStore(path) {
     proxy TEXT,
     state TEXT,
     added_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-  )`);
-  db.exec(`CREATE TABLE IF NOT EXISTS quota_cache (
-    token TEXT PRIMARY KEY,
-    data TEXT NOT NULL,
-    scanned_at INTEGER NOT NULL
   )`);
   return db;
 }
@@ -82,18 +77,6 @@ export function setAccountUid(token, uid) {
   db.prepare('UPDATE accounts SET uid = ? WHERE token = ?').run(uid || null, token);
 }
 
-// ---- quota cache ----
-
-export function getQuotaCache() {
-  return db.prepare('SELECT token, data, scanned_at FROM quota_cache')
-    .all()
-    .map((r) => ({ token: r.token, data: safeParse(r.data), scannedAt: r.scanned_at }));
-}
-
-export function setQuotaCache(token, data) {
-  db.prepare('INSERT INTO quota_cache (token, data, scanned_at) VALUES (?, ?, ?) ON CONFLICT(token) DO UPDATE SET data = excluded.data, scanned_at = excluded.scanned_at')
-    .run(token, JSON.stringify(data), Date.now());
-}
 
 function safeParse(s) {
   try { return JSON.parse(s); } catch { return null; }

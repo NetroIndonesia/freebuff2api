@@ -12,7 +12,8 @@
     "node": ">=20"
   },
   "dependencies": {
-    "undici": "^6.21.0",
-    "playwright": "^1.49.0"
+    "better-sqlite3": "^12.11.1",
+    "playwright": "^1.49.0",
+    "undici": "^6.21.0"
   }
 }

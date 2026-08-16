@@ -398,15 +398,24 @@ function inputModal(title, placeholder, onConfirm) {
 // ---------------------------------------------------------------- playground
 
 let chatHistory = [];
-// Markdown-lite renderer (code blocks, inline code, bold) — safe, escapes first.
+// Markdown-lite renderer (code blocks, inline code, bold, headings) — safe, escapes first.
 function md(text) {
   let s = esc(text);
-  s = s.replace(/```([\s\S]*?)```/g, (_, c) => `<pre><code>${c.trim()}</code></pre>`);
-  s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  // Protect fenced + inline code with placeholders so later transforms
+  // (especially \n -> <br>) never corrupt code content.
+  const blocks = [];
+  s = s.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, c) => {
+    blocks.push(`<pre><code>${c.replace(/^\n+|\n+$/g, '')}</code></pre>`);
+    return `\u0000${blocks.length - 1}\u0000`;
+  });
+  s = s.replace(/`([^`\n]+)`/g, (_, c) => {
+    blocks.push(`<code>${c}</code>`);
+    return `\u0000${blocks.length - 1}\u0000`;
+  });
   s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/^#{1,3}\s+(.+)$/gm, '<strong>$1</strong>');
   s = s.replace(/\n/g, '<br>');
-  return s;
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[+i] || '');
 }
 function addMessage(role, text, modelLabel) {
   const el = $('#chat-messages');
@@ -479,7 +488,7 @@ async function sendChat() {
             const rd = d.reasoning_content || '';
             const dc = d.content || '';
             if (rd) { reasoningFull += rd; reasoningEl.hidden = false; reasoningEl.textContent = reasoningFull; }
-            if (dc) { full += dc; contentEl.textContent = full; }
+            if (dc) { full += dc; contentEl.innerHTML = md(full); }
             $('#chat-messages').scrollTop = 1e9;
           } catch {}
         }

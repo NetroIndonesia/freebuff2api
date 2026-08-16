@@ -95,8 +95,3 @@ export async function scanQuota(accounts, concurrency = 3) {
     })),
   };
 }
-
-export function remaining(entry) {
-  if (!entry || entry.limit == null) return null;
-  return { left: entry.limit - (entry.recentCount || 0), limit: entry.limit };
-}
