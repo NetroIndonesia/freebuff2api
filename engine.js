@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 const CODEBUFF_API = "https://www.codebuff.com";
 const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
@@ -2497,14 +2497,15 @@ function corsHeaders() {
 // OAuth device-code login (onboard accounts without manually extracting tokens).
 // Mirrors the official CLI flow: POST /api/auth/cli/code -> poll /api/auth/cli/status.
 // ---------------------------------------------------------------------------
-function randomHex(n) {
-  const bytes = new Uint8Array(Math.ceil(n / 2));
-  crypto.getRandomValues(bytes);
-  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, n);
+function legacyFingerprint() {
+  // Official CLI legacy fallback fingerprint: codebuff-cli- + 8 base64url chars
+  // (fingerprint.ts calculateLegacyFingerprint). The old "gw-" prefix was not a
+  // real CLI fingerprint format and would classify as "unknown".
+  return "codebuff-cli-" + randomBytes(6).toString("base64url").substring(0, 8);
 }
 
 async function startDeviceAuth() {
-  const fpId = "gw-" + randomHex(12);
+  const fpId = legacyFingerprint();
   const r = await enqueueUp("POST", "/api/auth/cli/code", null,
     { fingerprintId: fpId }, { "Content-Type": "application/json" }, SESSION_TIMEOUT_MS);
   if (r.status !== 200 || !r.data?.loginUrl) {
