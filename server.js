@@ -201,10 +201,18 @@ function tokenFromInit(init) {
   return null;
 }
 
+// FREEBUFF_NO_DIRECT=1 → proxy-only: never fall back to a direct connection, so
+// the VPS egress IP is never exposed to upstream (avoids ip_capped / IP linking
+// across accounts). Default (unset) keeps the old direct-fallback behavior.
+const NO_DIRECT = String(process.env.FREEBUFF_NO_DIRECT || '').toLowerCase() === 'true';
+
 globalThis.fetch = function proxiedFetch(input, init = {}) {
   const bound = pool.bindingDispatcher(tokenFromInit(init));
   const entry = bound || pool.next();
-  if (!entry) return nativeFetch(input, init);
+  if (!entry) {
+    if (NO_DIRECT) return Promise.reject(new Error('no proxy available (FREEBUFF_NO_DIRECT=1)'));
+    return nativeFetch(input, init);
+  }
 
   const t0 = Date.now();
   const attempt = (dispatcher) => nativeFetch(input, { ...init, dispatcher });
@@ -220,9 +228,14 @@ globalThis.fetch = function proxiedFetch(input, init = {}) {
         const t1 = Date.now();
         return attempt(next.dispatcher).then(
           (res) => { pool.reportSuccess(next.key, Date.now() - t1); return res; },
-          (err) => { pool.reportFailure(next.key); return nativeFetch(input, init); },
+          (err2) => {
+            pool.reportFailure(next.key);
+            if (NO_DIRECT) throw err2;
+            return nativeFetch(input, init);
+          },
         );
       }
+      if (NO_DIRECT) throw err;
       return nativeFetch(input, init);
     },
   );

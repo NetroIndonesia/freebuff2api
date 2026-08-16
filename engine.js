@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 const CODEBUFF_API = "https://www.codebuff.com";
 const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
 const DEFAULT_API_KEY = "freebuff-default-key";
@@ -999,16 +1001,84 @@ function behaviorDue(key) {
   return false;
 }
 
-// Stable fingerprint derived from the token (FNV-1a, enhanced- prefix).
-function stableFingerprint(token) {
-  let h1 = 0x811c9dc5, h2 = 0x01000193;
-  const s = "freebuff-fp-v2:" + token;
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
-    h2 = Math.imul(h2 ^ c, 0x85ebca6b) >>> 0;
+// --- fingerprint / device spoof (official CLI format) ---
+
+function fnv1a(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
   }
-  return "enhanced-" + h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0");
+  return h >>> 0;
+}
+
+// Deterministic PRNG (mulberry32) so one token always yields the same identity.
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Stable per-token fingerprint in the official CLI's enhanced format:
+//   enhanced-<sha256 base64url of a hardware-info JSON>
+// (the previous FNV-1a 16-hex suffix did not match the real format). One token →
+// one stable fingerprint, so distinct accounts get distinct identities.
+function stableFingerprint(token) {
+  const rand = mulberry32(fnv1a(token));
+  const pick = (arr) => arr[Math.floor(rand() * arr.length)];
+  const hex = (n) => Array.from({ length: n }, () => "0123456789abcdef"[Math.floor(rand() * 16)]).join("");
+  const mac = () => Array.from({ length: 6 }, () => hex(2)).join(":");
+  const info = {
+    system: {
+      manufacturer: pick(["Apple Inc.", "LENOVO", "Dell Inc.", "ASUSTeK COMPUTER INC.", "HP", "Framework"]),
+      model: pick(["MacBook Pro", "MacBook Air", "ThinkPad X1 Carbon", "XPS 13 9315", "ROG Zephyrus G14", "Mac mini"]),
+      serial: hex(8).toUpperCase(),
+      uuid: `${hex(8)}-${hex(4)}-4${hex(3)}-${hex(4)}-${hex(12)}`,
+    },
+    cpu: {
+      manufacturer: pick(["Apple", "Intel", "AMD"]),
+      brand: pick(["Apple M2 Pro", "Apple M3", "Intel(R) Core(TM) i7-1360P", "AMD Ryzen 7 7840U"]),
+      cores: 8 + Math.floor(rand() * 8),
+      physicalCores: 4 + Math.floor(rand() * 8),
+    },
+    os: {
+      platform: "darwin",
+      distro: "macOS",
+      arch: "arm64",
+      hostname: `mac-${hex(4)}`,
+    },
+    runtime: {
+      nodeVersion: "v20.0.0",
+      platform: "darwin",
+      arch: "arm64",
+      shell: "/bin/zsh",
+      cpuCount: 8 + Math.floor(rand() * 8),
+    },
+    network: {
+      macAddresses: [mac(), mac()],
+      interfaceCount: 2 + Math.floor(rand() * 3),
+    },
+    machineId: hex(32),
+    fingerprintVersion: "2.0",
+  };
+  return "enhanced-" + createHash("sha256").update(JSON.stringify(info)).digest("base64url");
+}
+
+// Per-token device profile for the ad request (was hardcoded "macos / Asia/Shanghai
+// / zh-CN" for every account — a single-machine signal). Deterministic per token so
+// each account keeps a stable, distinct device.
+function deviceProfile(token) {
+  const rand = mulberry32(fnv1a(token) ^ 0x51ab3d);
+  const pick = (arr) => arr[Math.floor(rand() * arr.length)];
+  return {
+    os: pick(["macos", "macos", "windows", "linux"]),
+    timezone: pick(["Asia/Shanghai", "Asia/Jakarta", "Asia/Tokyo", "Asia/Singapore", "Europe/London", "America/Los_Angeles"]),
+    locale: pick(["zh-CN", "id-ID", "en-US", "ja-JP", "en-GB"]),
+  };
 }
 
 // Ad chain: POST /ads fetch → if impUrl is present, POST /ads/impression reports the impression.
@@ -1023,7 +1093,7 @@ async function runNormalClientBehavior(token, clientFingerprint) {
         provider: "gravity",
         sessionId: crypto.randomUUID(),
         surface: "waiting_room",
-        device: { os: "macos", timezone: "Asia/Shanghai", locale: "zh-CN" },
+        device: deviceProfile(token),
         userAgent: "Freebuff-CLI/0.0.138",
       }, { "User-Agent": "Freebuff-CLI/0.0.138", "Content-Type": "application/json" }, 6000);
       const impUrl = ad.data && Array.isArray(ad.data.ads) && ad.data.ads[0] && ad.data.ads[0].impUrl;
