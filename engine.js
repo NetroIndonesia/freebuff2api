@@ -1080,6 +1080,18 @@ function deviceProfile(token) {
     locale: pick(["zh-CN", "id-ID", "en-US", "ja-JP", "en-GB"]),
   };
 }
+// Browser-like UA passed to ad providers (matches common/src/util/ad-user-agent.ts).
+// Native runtime UAs look bot-like to ad networks; the CLI sends this instead.
+function browserUserAgent(os) {
+  const key = os === "macos" ? "darwin" : os === "windows" ? "win32" : "linux";
+  const map = {
+    darwin: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    win32: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    linux: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  };
+  return map[key] || map.linux;
+}
+
 
 // Ad chain: POST /ads fetch → if impUrl is present, POST /ads/impression reports the impression.
 // Ad chain: Freebuff-CLI/<version> UA;
@@ -1089,12 +1101,14 @@ async function runNormalClientBehavior(token, clientFingerprint) {
   // 1) pull ads + impression (30min throttle)
   if (behaviorDue("ads:" + token)) {
     try {
+      const device = deviceProfile(token);
       const ad = await enqueueUp("POST", "/api/v1/ads", token, {
         provider: "gravity",
+        messages: [], // waiting_room surface has no chat history yet (real CLI sends converted history)
         sessionId: crypto.randomUUID(),
         surface: "waiting_room",
-        device: deviceProfile(token),
-        userAgent: "Freebuff-CLI/0.0.138",
+        device,
+        userAgent: browserUserAgent(device.os),
       }, { "User-Agent": "Freebuff-CLI/0.0.138", "Content-Type": "application/json" }, 6000);
       const impUrl = ad.data && Array.isArray(ad.data.ads) && ad.data.ads[0] && ad.data.ads[0].impUrl;
       if (ad.status === 200 && impUrl) {
