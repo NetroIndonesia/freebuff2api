@@ -194,12 +194,15 @@
               <button class="btn btn-sm" id="account-auto-proxy" title="auto-bind proxies to accounts round-robin">⇄ auto proxy</button>
               <button class="btn btn-sm btn-danger" id="account-delete-banned" title="delete all banned accounts" hidden>✕ del banned</button>
               <button class="btn btn-sm" id="account-add-btn">+ add account</button>
+              <button class="btn btn-sm btn-primary" id="account-oauth-btn">+ oauth login</button>
             </div>
           </div>
-          <table class="table">
-            <thead><tr><th><input type="checkbox" id="accounts-select-all" /></th><th>#</th><th>token</th><th>state</th><th>cooldown</th><th>proxy</th><th></th></tr></thead>
-            <tbody id="accounts-table"></tbody>
-          </table>
+          <div class="table-scroll">
+            <table class="table">
+              <thead><tr><th><input type="checkbox" id="accounts-select-all" /></th><th>#</th><th>token</th><th>state</th><th>cooldown</th><th>proxy</th><th></th></tr></thead>
+              <tbody id="accounts-table"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 

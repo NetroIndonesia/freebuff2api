@@ -162,6 +162,12 @@ const env = {
   get FREEBUFF_DEBUG() { return String(state.debug); },
   get ROTATION_MODE() { return state.rotation; },
   get SESSION_ROTATE_EVERY() { return String(state.sessionRotateEvery); },
+  // Anti-ban tunables (operator env vars; engine.js reads them per request).
+  get FREEBUFF_ACCT_RPM() { return process.env.FREEBUFF_ACCT_RPM || '60'; },
+  get FREEBUFF_GLOBAL_RPM() { return process.env.FREEBUFF_GLOBAL_RPM || '300'; },
+  get FREEBUFF_AFFINITY_MAX_USES() { return process.env.FREEBUFF_AFFINITY_MAX_USES || '3'; },
+  get FREEBUFF_COOLDOWN_BASE_MS() { return process.env.FREEBUFF_COOLDOWN_BASE_MS || '30000'; },
+  get FREEBUFF_COOLDOWN_CAP_MS() { return process.env.FREEBUFF_COOLDOWN_CAP_MS || '1800000'; },
 };
 
 // --------------------------------------------------------------- proxy pool --
@@ -455,6 +461,7 @@ function handleAddAccount(res, body) {
   if (token.length <= 8) return json(res, { ok: false, error: 'invalid token' }, 400);
   store.addAccount(token, uid);
   reloadAccounts();
+  refreshQuotaBackground();
   json(res, { ok: true, accounts: state.accounts.length });
 }
 
@@ -578,6 +585,40 @@ function handleClearCache(res) {
     internals.deleteSession(token, s.model);
   }
   json(res, { ok: true, cleared: sessions.length });
+}
+
+// ----------------------------------------------------------- oauth login ----
+
+async function handleOAuthStart(res) {
+  try {
+    const info = await internals.startDeviceAuth();
+    json(res, { ok: true, loginUrl: info.loginUrl, fingerprintId: info.fingerprintId, fingerprintHash: info.fingerprintHash, expiresAt: info.expiresAt });
+  } catch (e) {
+    json(res, { ok: false, error: e.message }, 502);
+  }
+}
+
+async function handleOAuthStatus(res, query) {
+  const fpId = String(query.get('fingerprintId') || '').trim();
+  const fpHash = String(query.get('fingerprintHash') || '').trim();
+  const expiresAt = parseInt(query.get('expiresAt') || '0', 10) || 0;
+  if (!fpId) return json(res, { ok: false, error: 'fingerprintId required' }, 400);
+  try {
+    const result = await internals.pollDeviceAuth(fpId, fpHash, expiresAt);
+    let added = false;
+    if (result.status === 'ready' && result.authToken && result.authToken.length > 8) {
+      const idx = result.authToken.indexOf(':');
+      const token = idx > 0 ? result.authToken.slice(0, idx).trim() : result.authToken;
+      const uid = idx > 0 ? result.authToken.slice(idx + 1).trim() || result.uid || null : result.uid || null;
+      store.addAccount(token, uid);
+      reloadAccounts();
+      refreshQuotaBackground();
+      added = true;
+    }
+    json(res, { ok: true, status: result.status, added, uid: result.uid || null, email: result.email || null });
+  } catch (e) {
+    json(res, { ok: false, error: e.message }, 502);
+  }
 }
 
 // ---------------------------------------------------------------- quota ----
@@ -739,7 +780,7 @@ const server = createServer(async (nodeReq, res) => {
       ? safeParse(rawBody)
       : {};
     try {
-      await routeManagement(pathname, nodeReq.method, res, body);
+      await routeManagement(pathname, nodeReq.method, res, body, url.searchParams);
     } catch (err) {
       console.error('[server] management error:', err?.message || err);
       if (!res.headersSent) json(res, { error: 'internal error', type: 'internal_error' }, 500);
@@ -777,7 +818,7 @@ function safeParse(buf) {
   try { return JSON.parse(buf.toString('utf8')); } catch { return {}; }
 }
 
-function routeManagement(pathname, method, res, body) {
+function routeManagement(pathname, method, res, body, query = new URLSearchParams()) {
   switch (pathname) {
     case '/healthz': return handleStatus(res);
     case '/api/status': return handleStatus(res);
@@ -792,6 +833,8 @@ function routeManagement(pathname, method, res, body) {
     case '/api/account/bulk-delete': return handleBulkRemoveAccounts(res, body);
     case '/api/account/delete-banned': return handleRemoveBannedAccounts(res);
     case '/api/account/auto-proxy': return handleAutoApplyProxy(res);
+    case '/api/auth/cli/code': return handleOAuthStart(res);
+    case '/api/auth/cli/status': return handleOAuthStatus(res, query);
     case '/api/quota': return handleQuota(res);
     case '/api/quota/refresh': return refreshQuotaBackground().then(() => handleQuota(res));
     case '/api/models': return handleModels(res);

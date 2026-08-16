@@ -139,11 +139,13 @@ function quotaCell(entry, glmPromo) {
   return `<td class="mono ${cls}">${left}/${limit}</td>`;
 }
 
-async function renderQuota() {
+async function renderQuota(force = false) {
   const card = $('#view-quota .card');
   const table = $('#quota-table');
   table.innerHTML = '<div class="empty">scanning…</div>';
-  const data = await getQuota();
+  let data;
+  if (force) data = await api('/api/quota/refresh').catch(() => null);
+  else data = await getQuota();
   if (!data) { table.innerHTML = '<div class="empty">quota scan failed</div>'; return; }
   state.quota = data;
   $('#quota-scanned').textContent = `scanned ${new Date().toLocaleTimeString('en-GB')}`;
@@ -343,6 +345,43 @@ async function bindProxy(slot, proxy) {
   await renderAccounts();
 }
 
+async function startOAuthLogin() {
+  let info;
+  try {
+    info = await api('/api/auth/cli/code', { method: 'POST' });
+  } catch (e) {
+    showModal('oauth login', `<p class="muted">${esc('start failed: ' + e.message)}</p>`, `<button class="btn" id="modal-cancel">close</button>`);
+    $('#modal-cancel').addEventListener('click', closeModal);
+    return;
+  }
+  showModal('oauth login',
+    `<p class="muted">Open this URL in a browser and authorize GitHub:</p>
+     <div class="endpoint-box"><code id="oauth-url">${esc(info.loginUrl)}</code></div>
+     <p class="muted" style="margin-top:10px">status: <span id="oauth-status" class="pill warn">waiting for authorization…</span></p>`,
+    `<button class="btn" id="modal-cancel">close</button><button class="btn btn-primary" id="oauth-poll">check status</button>`);
+  $('#modal-cancel').addEventListener('click', closeModal);
+  $('#oauth-poll').addEventListener('click', async () => {
+    const btn = $('#oauth-poll');
+    btn.disabled = true;
+    try {
+      const qs = new URLSearchParams({ fingerprintId: info.fingerprintId, fingerprintHash: info.fingerprintHash || '', expiresAt: String(info.expiresAt || 0) });
+      const st = await api('/api/auth/cli/status?' + qs.toString());
+      if (st.status === 'ready') {
+        $('#oauth-status').className = 'pill ok'; $('#oauth-status').textContent = 'authorized ✓ account added';
+        logActivity('oauth account added');
+        closeModal();
+        await refreshAll();
+      } else {
+        $('#oauth-status').textContent = 'still pending — authorize the URL first';
+      }
+    } catch (e) {
+      $('#oauth-status').className = 'pill err'; $('#oauth-status').textContent = 'error: ' + e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
 // ---------------------------------------------------------------- settings
 
 async function loadSettings() {
@@ -481,7 +520,6 @@ async function sendChat() {
           const t = line.trim();
           if (!t.startsWith('data:')) continue;
           const payload = t.slice(5).trim();
-          if (payload === '[DONE]') continue;
           try {
             const j = JSON.parse(payload);
             const d = j.choices?.[0]?.delta || {};
@@ -520,7 +558,7 @@ async function sendChat() {
 
 function wireEvents() {
   $('#refresh-btn').addEventListener('click', refreshAll);
-  $('#quota-scan').addEventListener('click', renderQuota);
+  $('#quota-scan').addEventListener('click', () => renderQuota(true));
   $('#chat-send').addEventListener('click', sendChat);
   $('#chat-input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } });
   $('#session-create').addEventListener('click', () => {
@@ -544,6 +582,7 @@ function wireEvents() {
     logActivity(`account added`);
     await renderAccounts();
   }));
+  $('#account-oauth-btn').addEventListener('click', startOAuthLogin);
   $('#account-rotate').addEventListener('click', async () => {
     await api('/api/account/rotate', { method: 'POST', body: '{}' });
     logActivity('account rotation advanced');

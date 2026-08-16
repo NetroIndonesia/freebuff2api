@@ -419,6 +419,26 @@ let accountIdx = 0;
 const cooldowns = new Map();      // token -> cooldown expiration ms
 const sessCache = new Map();      // `${token}:${sessionModel}` -> { instanceId, model, remainingMs, expiresAt } (must include token to avoid cross-account mixing)
 const sessUseCount = new Map();   // `${token}:${sessionModel}` -> requests served by the current session (session round-robin)
+// ---------------------------------------------------------------------------
+// Anti-ban protection: per-account RPM, affinity decay, stepped backoff,
+// terminal ban isolation, global RPM guard, round-robin jitter.
+// ---------------------------------------------------------------------------
+const acctRequests = new Map();      // token -> [ts, ...] sliding-window timestamps
+const acctFailCount = new Map();     // token -> consecutive failures (stepped backoff / breaker)
+const affinityUse = new Map();       // `${token}:${sessionModel}` -> { count, windowStart }
+const globalRequests = [];           // global sliding-window timestamps
+
+const ACCT_RPM_DEFAULT = 60;               // per-account max chat requests/min
+const GLOBAL_RPM_DEFAULT = 300;            // global max chat requests/min
+const WINDOW_MS = 60 * 1000;               // 60s sliding window
+const AFFINITY_MAX_USES_DEFAULT = 3;       // max consecutive reuse of one account+model session
+const AFFINITY_WINDOW_MS = 10 * 60 * 1000; // affinity count window (reset)
+const COOLDOWN_BASE_MS = 30 * 1000;        // stepped backoff base
+const COOLDOWN_CAP_MS = 30 * 60 * 1000;    // stepped backoff cap
+const BREAKER_THRESHOLD = 3;               // consecutive failures before circuit breaker opens
+const BREAKER_COOLDOWN_MS = 12 * 3600 * 1000; // breaker-open cooldown
+const TERMINAL_COOLDOWN_MS = 24 * 3600 * 1000; // banned terminal isolation
+
 
 
 function parseAccounts(env) {
@@ -474,6 +494,8 @@ function recordAccountObservation(token, status, dataOrText, extra = {}) {
     retryAfterMs: typeof extra.retryAfterMs === "number" ? extra.retryAfterMs : previous.retryAfterMs || null,
     checkedAt: Date.now(),
   });
+  // Terminal ban isolation: an upstream-observed ban locks the account for 24h.
+  if (state === "banned") cooldown(token, TERMINAL_COOLDOWN_MS);
 }
 
 function summarizeAccountHealth(pool, health) {
@@ -514,36 +536,58 @@ function pickToken(env, sessionModel, roundRobin = false) {
   const pool = parseAccounts(env);
   if (pool.length === 0) return null;
 
+  // Terminal (banned) accounts are isolated 24h and excluded from selection.
+  const nonTerminal = pool.filter((acct) => !isTerminal(acct.token));
+  const basePool = nonTerminal.length > 0 ? nonTerminal : pool;
+
   // Skip accounts already probed invalid (alive=false); unprobed/probe-failed are
   // not skipped (avoid false kills).
-  const alivePool = pool.filter((acct) => {
+  const alivePool = basePool.filter((acct) => {
     const h = acctHealth.get(acct.token);
     return !(h && h.alive === false);
   });
-  const usePool = alivePool.length > 0 ? alivePool : pool;
-  const finalPool = usePool;
+  const usePool = alivePool.length > 0 ? alivePool : basePool;
+
+  // Quota-aware ordering: prefer accounts with more remaining quota for the requested
+  // model. Only influences account choice, never the caller-requested model.
+  const quotaSorted = [...usePool].sort((a, b) => {
+    const ra = remainingQuota(a.token, sessionModel);
+    const rb = remainingQuota(b.token, sessionModel);
+    if (ra === null && rb === null) return 0;
+    if (ra === null) return 1;
+    if (rb === null) return -1;
+    return rb - ra;
+  });
+  const withQuota = quotaSorted.filter((a) => {
+    const r = remainingQuota(a.token, sessionModel);
+    return r !== null && r > 0;
+  });
+  const finalPool = withQuota.length > 0 ? withQuota : quotaSorted;
 
   // Default: prefer reusing the account with an active cached session (a session
   // is valid ~1h and only session creation deducts free quota). Pin to one account
-  // while its session is alive, switch only after it is used up.
-  //
-  // Round-robin mode: skip the pin and spread every request across accounts, so a
-  // single account/session never receives sustained traffic (abuse-detection safe).
+  // while its session is alive, but only while under its per-account RPM and affinity
+  // limits (anti-ban). Round-robin mode skips the pin entirely.
   if (sessionModel && !roundRobin) {
     for (const acct of finalPool) {
       const t = acct.token;
       if (cooldowns.has(t) && cooldowns.get(t) > Date.now()) continue;
+      if (acctRateLimited(env, t)) continue;
+      if (affinityExhausted(env, t, sessionModel)) continue;
       const cached = sessCache.get(t + ":" + sessionModel);
       if (isUsableSession(cached)) return acct;
     }
   }
 
-  // Round-robin when there is no active cache (or in round-robin mode).
+  // Round-robin (jittered) when there is no active cache (or in round-robin mode).
+  const startIdx = finalPool.length > 0 ? Math.floor(Math.random() * finalPool.length) : 0;
   for (let k = 0; k < finalPool.length; k++) {
-    const acct = finalPool[accountIdx % finalPool.length];
-    accountIdx = (accountIdx + 1) % finalPool.length;
+    const acct = finalPool[(startIdx + k) % finalPool.length];
     const t = acct.token;
-    if (!cooldowns.has(t) || cooldowns.get(t) <= Date.now()) return acct;
+    if (cooldowns.has(t) && cooldowns.get(t) > Date.now()) continue;
+    if (acctRateLimited(env, t)) continue;
+    accountIdx = (startIdx + k + 1) % finalPool.length;
+    return acct;
   }
   const oldest = [...cooldowns.entries()].sort((a, b) => a[1] - b[1])[0];
   if (oldest) cooldowns.delete(oldest[0]);
@@ -584,6 +628,106 @@ function logAccountRoute(enabled, pool, token, model, attempt, reason) {
 function cooldown(token, ms) {
   if (ms > 0) cooldowns.set(token, Date.now() + ms);
 }
+// --- anti-ban helpers ---
+
+// Per-account sliding-window rate limit (read-only): within the 60s window at the
+// configured RPM cap → true (caller should switch accounts).
+function acctRateLimited(env, token) {
+  const limit = parseInt(env.FREEBUFF_ACCT_RPM, 10) || ACCT_RPM_DEFAULT;
+  if (limit <= 0) return false;
+  const now = Date.now();
+  const arr = (acctRequests.get(token) || []).filter((t) => now - t < WINDOW_MS);
+  return arr.length >= limit;
+}
+
+// Record one use for the per-account RPM window (called when an account is actually used).
+function acctRateMarkUsed(env, token) {
+  const limit = parseInt(env.FREEBUFF_ACCT_RPM, 10) || ACCT_RPM_DEFAULT;
+  if (limit <= 0) return;
+  const now = Date.now();
+  const arr = (acctRequests.get(token) || []).filter((t) => now - t < WINDOW_MS);
+  arr.push(now);
+  acctRequests.set(token, arr);
+}
+
+// Affinity decay (read-only): same account+model reused consecutively >= limit → true.
+function affinityExhausted(env, token, sessionModel) {
+  const limit = parseInt(env.FREEBUFF_AFFINITY_MAX_USES, 10);
+  const maxUses = Number.isFinite(limit) && limit >= 0 ? limit : AFFINITY_MAX_USES_DEFAULT;
+  if (maxUses === 0) return false;
+  const a = affinityUse.get(token + ":" + sessionModel);
+  if (!a) return false;
+  const now = Date.now();
+  if (now - a.windowStart > AFFINITY_WINDOW_MS) return false;
+  return a.count >= maxUses;
+}
+
+// Record one consecutive reuse for affinity decay (called on a successful use).
+function affinityMarkUsed(env, token, sessionModel) {
+  const limit = parseInt(env.FREEBUFF_AFFINITY_MAX_USES, 10);
+  const maxUses = Number.isFinite(limit) && limit >= 0 ? limit : AFFINITY_MAX_USES_DEFAULT;
+  if (maxUses === 0) return;
+  const key = token + ":" + sessionModel;
+  const now = Date.now();
+  const a = affinityUse.get(key);
+  if (!a || now - a.windowStart > AFFINITY_WINDOW_MS) {
+    affinityUse.set(key, { count: 1, windowStart: now });
+  } else {
+    a.count++;
+  }
+}
+
+// Global RPM guard: returns true when the process-wide chat rate exceeds the cap.
+function globalRateLimitHit(env) {
+  const limit = parseInt(env.FREEBUFF_GLOBAL_RPM, 10) || GLOBAL_RPM_DEFAULT;
+  if (limit <= 0) return false;
+  const now = Date.now();
+  while (globalRequests.length && now - globalRequests[0] >= WINDOW_MS) globalRequests.shift();
+  if (globalRequests.length >= limit) return true;
+  globalRequests.push(now);
+  return false;
+}
+
+function isTerminal(token) {
+  const h = acctHealth.get(token);
+  return !!(h && h.state === "banned");
+}
+
+// Stepped exponential backoff keyed on consecutive failures, reset on success.
+// Repeated failures (>= BREAKER_THRESHOLD) open the circuit breaker for a long cooldown.
+function cooldownWithBackoff(token, baseMs = 0) {
+  const fails = (acctFailCount.get(token) || 0) + 1;
+  acctFailCount.set(token, fails);
+  const eff = fails >= BREAKER_THRESHOLD
+    ? BREAKER_COOLDOWN_MS
+    : Math.min(Math.max(baseMs || 0, COOLDOWN_BASE_MS * Math.pow(2, fails - 1)), COOLDOWN_CAP_MS);
+  cooldown(token, eff);
+}
+
+function acctSucceeded(token) {
+  acctFailCount.set(token, 0);
+}
+
+// Local 429 lock: when every account is cooling down or rate-limited, answer 429
+// with Retry-After locally (zero upstream traffic). Returns the wait ms, or null if
+// at least one account is usable.
+function allAccountsBlocked(pool, env) {
+  if (pool.length === 0) return null;
+  const now = Date.now();
+  let minWait = null;
+  for (const acct of pool) {
+    const t = acct.token;
+    const cd = cooldowns.get(t);
+    if (cd && cd > now) {
+      minWait = minWait === null ? cd - now : Math.min(minWait, cd - now);
+      continue;
+    }
+    if (acctRateLimited(env, t)) continue;
+    return null; // at least one usable account
+  }
+  return minWait || 1000;
+}
+
 
 // Official Freebuff session-gate recovery requires matching both the HTTP
 // status and the relayed error code. Do not treat session_limit_reached or
@@ -1041,6 +1185,35 @@ const UPSTREAM_KEYS = [
 // Prefix bypass already patched upstream; returns 403 free_mode_cli_required).
 const BUFFY = "You are Buffy, the strategic coding assistant.";
 
+// Normalize OpenAI chat message content parts: image_url (string/object), input_image,
+// and raw image/base64 parts are rewritten to a uniform image_url data-URL form so
+// multimodal requests (mimo/mimo-v2.5 and other vision models) pass upstream.
+function normalizeMessageContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return content;
+  const parts = [];
+  for (const p of content) {
+    if (!p || typeof p !== "object") continue;
+    if (p.type === "image_url") {
+      let url = p.image_url;
+      if (typeof url === "string") url = { url };
+      else if (url && typeof url === "object" && typeof url.url === "string") url = { url: url.url };
+      else continue;
+      parts.push({ type: "image_url", image_url: url });
+    } else if (p.type === "input_image") {
+      const url = p.image_url || p.url;
+      if (typeof url === "string") parts.push({ type: "image_url", image_url: { url } });
+    } else if (p.type === "image") {
+      const data = p.data || p.base64;
+      const mt = p.media_type || p.mediaType || "image/png";
+      if (typeof data === "string") parts.push({ type: "image_url", image_url: { url: `data:${mt};base64,${data}` } });
+    } else {
+      parts.push(p);
+    }
+  }
+  return parts;
+}
+
 function normalizeMessages(messages) {
   if (!Array.isArray(messages)) return [];
   const out = [];
@@ -1049,6 +1222,7 @@ function normalizeMessages(messages) {
     if (!m || typeof m !== "object") continue;
     const item = { ...m };
     if (item.role === "developer") item.role = "system";
+    if (Array.isArray(item.content)) item.content = normalizeMessageContent(item.content);
     if (item.role === "system") {
       hasSystem = true;
       item.cache_control = { type: "ephemeral" };
@@ -1111,7 +1285,25 @@ function normalizeReasoningEffort(model, effort) {
   return clamped === String(effort) ? effort : clamped;
 }
 
+// Collapse Anthropic/Codex-style reasoning.effort into reasoning_effort when the latter
+// is absent, and drop the dotted/object form to avoid conflicting values rejected upstream.
+function normalizeReasoningFields(params) {
+  if (!params || typeof params !== "object") return;
+  if (params.reasoning && typeof params.reasoning === "object" && params.reasoning.effort) {
+    if (params.reasoning_effort === undefined || params.reasoning_effort === null) {
+      params.reasoning_effort = params.reasoning.effort;
+    }
+  }
+  if (params["reasoning.effort"] !== undefined && params["reasoning.effort"] !== null) {
+    if (params.reasoning_effort === undefined || params.reasoning_effort === null) {
+      params.reasoning_effort = params["reasoning.effort"];
+    }
+    delete params["reasoning.effort"];
+  }
+}
+
 function buildUpstreamPayload(params, mc, sess, runId) {
+  normalizeReasoningFields(params);
   const payload = {};
   for (const k of UPSTREAM_KEYS) if (params[k] !== undefined && params[k] !== null) payload[k] = params[k];
   // clamp reasoning_effort to the model effort table
@@ -1439,6 +1631,17 @@ async function executeChat(env, chatParams, mc, isStream, mode, pinSlot = null, 
     if (!p) return jsonResponse({ error: { message: "Invalid account slot: " + pinSlot, type: "invalid_request" } }, 400);
     pinnedToken = p.token;
   }
+  // Global RPM guard: reject locally with an honest 429 instead of hammering the upstream channel.
+  if (globalRateLimitHit(env)) {
+    return jsonResponse({ error: { message: "global rate limit exceeded", type: "rate_limited" } }, 429, { "Retry-After": "60" });
+  }
+  // Local 429 lock (zero upstream traffic): every account cooling down or rate-limited.
+  if (!pinnedToken) {
+    const waitMs = allAccountsBlocked(pool, env);
+    if (waitMs !== null) {
+      return jsonResponse({ error: { message: "all accounts rate-limited or cooling down", type: "rate_limited" } }, 429, { "Retry-After": String(Math.ceil(waitMs / 1000)) });
+    }
+  }
   const tryCount = pinnedToken ? 1 : pool.length;
 
   // In-request multi-account retry: one account fails (timeout/429/428 rebuild
@@ -1450,6 +1653,7 @@ async function executeChat(env, chatParams, mc, isStream, mode, pinSlot = null, 
     if (!token) break;
     logAccountRoute(debug, pool, token, mc.session, acctTry + 1,
       isUsableSession(sessCache.get(token + ":" + mc.session)) ? "active_session" : "quota_or_round_robin");
+    acctRateMarkUsed(env, token);
     try {
       // 1) session
       let sess = await createSession(token, mc.session, forceNewSession);
@@ -1532,7 +1736,7 @@ async function executeChat(env, chatParams, mc, isStream, mode, pinSlot = null, 
         }
         // rebuild still fails: account session state abnormal; cooldown handed to outer account switch
         if (staleSession) cooldown(token, 60 * 1000);
-        cooldown(token, parseCooldown(errText, resp.status));
+        cooldownWithBackoff(token, parseCooldown(errText, resp.status));
         break;
       }
       if (!resp.ok) {
@@ -1540,6 +1744,10 @@ async function executeChat(env, chatParams, mc, isStream, mode, pinSlot = null, 
         if (debug) console.log(`[acct ${acctTry + 1}] failed ${resp.status}, switch account`);
         continue;
       }
+
+      // Account succeeded: reset failure/breaker counters and record affinity use.
+      acctSucceeded(token);
+      affinityMarkUsed(env, token, mc.session);
 
       if (isStream) {
         const { readable, writable } = new TransformStream();
@@ -1567,7 +1775,7 @@ async function executeChat(env, chatParams, mc, isStream, mode, pinSlot = null, 
       // createSession 429 (quota exhausted) cooldown by retryAfterMs/text, must not be fixed 60s.
       if (/create session failed|stayed queued|start_run failed|session_model_mismatch|abort|timeout|timed out|terminated/i.test(msg)) {
         const m429 = msg.match(/429/);
-        cooldown(token, m429 ? parseCooldown(msg, 429) : 60 * 1000);
+        cooldownWithBackoff(token, m429 ? parseCooldown(msg, 429) : 60 * 1000);
       }
       lastErrMsg = msg;
       if (debug) console.log(`[acct ${acctTry + 1}] exception: ${msg.slice(0, 120)}, switch account`);
@@ -1615,6 +1823,13 @@ function anthropicContent(content) {
       if (s.type === "base64" && s.media_type && s.data) out.push({ type: "image_url", image_url: { url: `data:${s.media_type};base64,${s.data}` } });
       else if (s.type === "url" && s.url) out.push({ type: "image_url", image_url: { url: s.url } });
     }
+    // Anthropic document blocks (image media only); pdf/text documents are not
+    // faithfully convertible to an upstream image and are skipped.
+    if (p.type === "document" && p.source && typeof p.source === "object") {
+      const s = p.source;
+      if (s.type === "base64" && s.media_type && s.media_type.startsWith("image/") && s.data) out.push({ type: "image_url", image_url: { url: `data:${s.media_type};base64,${s.data}` } });
+      else if (s.type === "url" && s.url) out.push({ type: "image_url", image_url: { url: s.url } });
+    }
   }
   return out;
 }
@@ -1635,12 +1850,26 @@ function anthropicToChat(body, mc) {
   if (body.metadata && typeof body.metadata === "object") chat.metadata = body.metadata;
 
   if (Array.isArray(body.tools) && body.tools.length) {
-    chat.tools = body.tools.filter((t) => t && t.name).map((t) => ({ type: "function", function: { name: t.name, description: t.description || "", parameters: t.input_schema || { type: "object", properties: {} } } }));
-    const tc = body.tool_choice;
-    if (tc?.type === "auto") chat.tool_choice = "auto";
-    else if (tc?.type === "any") chat.tool_choice = "required";
-    else if (tc?.type === "none") chat.tool_choice = "none";
-    else if (tc?.type === "tool" && tc.name) chat.tool_choice = { type: "function", function: { name: tc.name } };
+    chat.tools = [];
+    for (const t of body.tools) {
+      if (!t || typeof t !== "object") continue;
+      const ttype = String(t.type || "").toLowerCase();
+      // Anthropic built-in web-search tools have a type but no .name; map them to a
+      // named function tool so the request carries a valid function-tool signature.
+      if (ttype === "web_search" || ttype === "web_search_20250305" || ttype === "server_web_search") {
+        chat.tools.push({ type: "function", function: { name: "web_search", description: t.description || "Search the web", parameters: t.input_schema || { type: "object", properties: {} } } });
+      } else if (t.name) {
+        chat.tools.push({ type: "function", function: { name: t.name, description: t.description || "", parameters: t.input_schema || { type: "object", properties: {} } } });
+      }
+    }
+    if (!chat.tools.length) delete chat.tools;
+    else {
+      const tc = body.tool_choice;
+      if (tc?.type === "auto") chat.tool_choice = "auto";
+      else if (tc?.type === "any") chat.tool_choice = "required";
+      else if (tc?.type === "none") chat.tool_choice = "none";
+      else if (tc?.type === "tool" && tc.name) chat.tool_choice = { type: "function", function: { name: tc.name } };
+    }
   }
 
   for (const m of Array.isArray(body.messages) ? body.messages : []) {
@@ -1654,9 +1883,21 @@ function anthropicToChat(body, mc) {
         if (text) chat.messages.push({ role: "user", content: text });
       } else chat.messages.push({ role: "user", content: anthropicContent(m.content) });
     } else if (m.role === "assistant") {
-      const uses = Array.isArray(m.content) ? m.content.filter((p) => p && p.type === "tool_use") : [];
-      if (uses.length) chat.messages.push({ role: "assistant", content: anthropicText(m.content), tool_calls: uses.map((p) => ({ id: p.id || ("call_" + Math.random().toString(36).slice(2, 10)), type: "function", function: { name: p.name || "", arguments: JSON.stringify(p.input ?? {}) } })) });
-      else chat.messages.push({ role: "assistant", content: anthropicText(m.content) });
+      const parts = Array.isArray(m.content) ? m.content : [];
+      // tool_use + server_tool_use + any *_tool_use variant → OpenAI tool_calls.
+      const uses = parts.filter((p) => p && typeof p === "object" && typeof p.type === "string" && (p.type === "tool_use" || p.type.endsWith("_tool_use")));
+      const msg = { role: "assistant", content: anthropicText(m.content) };
+      if (uses.length) {
+        msg.tool_calls = uses.map((p) => ({
+          id: p.id || p.tool_use_id || ("call_" + Math.random().toString(36).slice(2, 10)),
+          type: "function",
+          function: { name: p.name || p.tool_name || "", arguments: JSON.stringify(p.input ?? {}) },
+        }));
+      }
+      // thinking blocks → reasoning_content (round-trip, upstream may ignore it).
+      const thinking = parts.filter((p) => p && p.type === "thinking" && (p.thinking || p.text)).map((p) => String(p.thinking || p.text || "")).join("\n\n");
+      if (thinking) msg.reasoning_content = thinking;
+      chat.messages.push(msg);
     }
   }
   return chat;
@@ -2185,6 +2426,59 @@ function corsHeaders() {
 }
 
 // ---------------------------------------------------------------------------
+// OAuth device-code login (onboard accounts without manually extracting tokens).
+// Mirrors the official CLI flow: POST /api/auth/cli/code -> poll /api/auth/cli/status.
+// ---------------------------------------------------------------------------
+function randomHex(n) {
+  const bytes = new Uint8Array(Math.ceil(n / 2));
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, n);
+}
+
+async function startDeviceAuth() {
+  const fpId = "gw-" + randomHex(12);
+  const r = await enqueueUp("POST", "/api/auth/cli/code", null,
+    { fingerprintId: fpId }, { "Content-Type": "application/json" }, SESSION_TIMEOUT_MS);
+  if (r.status !== 200 || !r.data?.loginUrl) {
+    throw new Error("device auth start failed: " + r.status + " " + (r.text || "").slice(0, 200));
+  }
+  return {
+    loginUrl: r.data.loginUrl,
+    fingerprintId: r.data.fingerprintId || fpId,
+    fingerprintHash: r.data.fingerprintHash || "",
+    expiresAt: Number(r.data.expiresAt || 0),
+  };
+}
+
+async function pollDeviceAuth(fingerprintId, fingerprintHash, expiresAt) {
+  const qs = new URLSearchParams({
+    fingerprintId,
+    fingerprintHash: fingerprintHash || "",
+    expiresAt: String(expiresAt || 0),
+  });
+  const r = await enqueueUp("GET", "/api/auth/cli/status?" + qs.toString(), null, undefined, {}, SESSION_TIMEOUT_MS);
+  if (r.status !== 200 || !r.data) return { status: "pending" };
+  const user = r.data.user && typeof r.data.user === "object" ? r.data.user : {};
+  const token = user.authToken || r.data.authToken || r.data.token || "";
+  const message = r.data.message || "";
+  if (message === "Authentication successful!" && token) {
+    let uid = user.id || r.data.userId || r.data.uid || "";
+    let email = user.email || r.data.email || "";
+    if (!uid || !email) {
+      try {
+        const me = await enqueueUp("GET", "/api/v1/me", token, undefined, {}, SESSION_TIMEOUT_MS);
+        if (me.status === 200 && me.data && typeof me.data === "object") {
+          uid = uid || me.data.id || "";
+          email = email || me.data.email || "";
+        }
+      } catch {}
+    }
+    return { status: "ready", authToken: token, uid, email };
+  }
+  return { status: "pending" };
+}
+
+// ---------------------------------------------------------------------------
 // Management bridge (consumed by server.js dashboard/management API only).
 // Read-only introspection + explicit session control. Does not touch chat flow.
 // ---------------------------------------------------------------------------
@@ -2209,6 +2503,9 @@ export const internals = {
   accountHealth: () => Object.fromEntries(acctHealth),
   cooldowns: () => Object.fromEntries(cooldowns),
   cooldown: (token, ms) => cooldown(token, ms),
+  failCounts: () => Object.fromEntries(acctFailCount),
+  startDeviceAuth: () => startDeviceAuth(),
+  pollDeviceAuth: (fpId, fpHash, exp) => pollDeviceAuth(fpId, fpHash, exp),
   modelTableCached: () => mergeModelTables(MODELS, dynamicModelsCache.models || []),
   modelTable: async () => {
     try {
