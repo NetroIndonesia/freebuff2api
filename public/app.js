@@ -11,6 +11,46 @@ const state = { models: [], accounts: [], proxies: [], quota: null, activity: []
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+// ---------------------------------------------------------------- overflow menu
+// One reusable "⋯" dropdown: many actions live behind one button; closes on
+// outside click, Esc, scroll, or resize.
+let openMenu = null;
+function closeMenu() { if (openMenu) { openMenu.remove(); openMenu = null; } }
+function popMenu(anchor, items) {
+  closeMenu();
+  const menu = document.createElement('div');
+  menu.className = 'menu';
+  menu.__anchor = anchor;
+  for (const it of items) {
+    if (it === '-') { const sep = document.createElement('div'); sep.className = 'menu-sep'; menu.appendChild(sep); continue; }
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'menu-item' + (it.danger ? ' danger' : '');
+    b.textContent = it.label;
+    b.addEventListener('click', () => { closeMenu(); it.fn && it.fn(); });
+    menu.appendChild(b);
+  }
+  document.body.appendChild(menu);
+  const r = anchor.getBoundingClientRect();
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  let x = Math.min(r.left, window.innerWidth - mw - 8);
+  let y = r.bottom + 4;
+  if (y + mh > window.innerHeight - 8) y = r.top - mh - 4;
+  menu.style.left = Math.max(8, x) + 'px';
+  menu.style.top = Math.max(8, y) + 'px';
+  openMenu = menu;
+}
+function toggleMenu(anchor, items) {
+  if (openMenu && openMenu.__anchor === anchor) { closeMenu(); return; }
+  popMenu(anchor, items);
+}
+document.addEventListener('click', (e) => {
+  if (openMenu && !openMenu.contains(e.target) && !(openMenu.__anchor && openMenu.__anchor.contains(e.target))) closeMenu();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); });
+window.addEventListener('scroll', () => closeMenu(), true);
+window.addEventListener('resize', () => closeMenu());
+
 function logActivity(msg, kind = 'info') {
   state.activity.unshift({ ts: new Date().toLocaleTimeString('en-GB'), msg, kind });
   state.activity = state.activity.slice(0, 120);
@@ -237,17 +277,19 @@ async function renderProxies() {
       <td class="mono">${p.fails}</td>
       <td class="mono">${p.latencyMs != null ? p.latencyMs + 'ms' : '—'}</td>
       <td class="mono dim">${p.lastUsed ? fmtClock(p.lastUsed) : '—'}</td>
-      <td>
-        <button class="btn btn-sm" data-test-proxy="${esc(p.url)}">test</button>
-        <button class="btn btn-sm btn-danger" data-del-proxy="${esc(p.url)}">del</button>
-      </td>
+      <td class="row-actions"><button class="kebab" data-proxy-menu="${esc(p.url)}" title="actions">⋯</button></td>
     </tr>`).join('') || '<tr><td colspan="7" class="empty">no proxies — direct connection</td></tr>';
-  $$('#proxies-table [data-test-proxy]').forEach((b) => b.addEventListener('click', () => testProxy(b.dataset.testProxy)));
-  $$('#proxies-table [data-del-proxy]').forEach((b) => b.addEventListener('click', () => confirmModal('remove proxy', `${b.dataset.delProxy}?`, async () => {
-    await api('/api/proxy', { method: 'DELETE', body: JSON.stringify({ url: b.dataset.delProxy }) });
-    logActivity(`proxy removed`);
-    await renderProxies();
-  })));
+  $$('#proxies-table [data-proxy-menu]').forEach((b) => b.addEventListener('click', () => {
+    const url = b.dataset.proxyMenu;
+    toggleMenu(b, [
+      { label: 'test', fn: () => testProxy(url) },
+      { label: 'remove', danger: true, fn: () => confirmModal('remove proxy', `${url}?`, async () => {
+        await api('/api/proxy', { method: 'DELETE', body: JSON.stringify({ url }) });
+        logActivity('proxy removed');
+        await renderProxies();
+      }) },
+    ]);
+  }));
 }
 async function testProxy(url) {
   logActivity(`testing proxy ${url}…`);
@@ -272,17 +314,14 @@ function stopProxyAutoRefresh() {
 async function renderAccounts() {
   const { accounts } = await getAccounts();
   state.accounts = accounts;
+  state.bannedCount = accounts.filter((a) => a.state === 'banned').length;
   $('#accounts-count').textContent = `${accounts.length} accounts`;
-  const bannedCount = accounts.filter((a) => a.state === 'banned').length;
-  const delBtn = $('#account-delete-banned');
-  if (delBtn) { delBtn.hidden = bannedCount === 0; delBtn.textContent = bannedCount ? `✕ del banned (${bannedCount})` : '✕ del banned'; }
   $('#accounts-table').innerHTML = accounts.map((a) => {
     const cooling = a.cooldownUntil && a.cooldownUntil > Date.now();
     const cooldownCell = cooling ? pill('cooldown', fmtDur(a.cooldownUntil - Date.now())) : '<span class="muted">—</span>';
     const proxyCell = a.boundProxy
       ? `<span class="pill info" title="${esc(a.boundProxy)}"><span class="dot"></span>${esc(proxyHost(a.boundProxy))}</span>`
       : '<span class="muted">auto</span>';
-    const activeLabel = a.active ? 'on' : 'off';
     return `<tr class="${a.active ? '' : 'row-inactive'}">
       <td><input type="checkbox" class="acct-chk" data-slot="${a.slot}" /></td>
       <td class="mono dim">#${a.slot}</td>
@@ -290,44 +329,54 @@ async function renderAccounts() {
       <td>${pill(a.state)}${a.manualState ? ` <span class="pill info"><span class="dot"></span>manual</span>` : ''}</td>
       <td>${cooldownCell}</td>
       <td>${proxyCell}</td>
-      <td class="row-actions">
-        <button class="btn btn-sm" data-act="${a.slot}" title="toggle active/inactive">${activeLabel}</button>
-        <button class="btn btn-sm" data-cool="${a.slot}" title="cooldown 5 min">cool</button>
-        <button class="btn btn-sm" data-rl="${a.slot}" title="mark rate_limited">rl</button>
-        <button class="btn btn-sm btn-danger" data-ban="${a.slot}" title="mark banned">ban</button>
-        <button class="btn btn-sm" data-bind="${a.slot}" title="bind proxy">proxy</button>
-        <button class="btn btn-sm btn-danger" data-del-acct="${a.slot}" title="remove">del</button>
-      </td>
+      <td class="row-actions"><button class="kebab" data-acct-menu="${a.slot}" title="actions">⋯</button></td>
     </tr>`;
   }).join('') || '<tr><td colspan="7" class="empty">no accounts — add tokens in settings</td></tr>';
 
-  $$('#accounts-table [data-act]').forEach((b) => b.addEventListener('click', async () => {
-    const a = state.accounts.find((x) => x.slot === Number(b.dataset.act));
-    await api('/api/account/active', { method: 'POST', body: JSON.stringify({ slot: Number(b.dataset.act), active: !a.active }) });
-    logActivity(`account #${b.dataset.act} ${!a.active ? 'activated' : 'deactivated'}`);
-    await renderAccounts();
+  $$('#accounts-table [data-acct-menu]').forEach((b) => b.addEventListener('click', () => {
+    const slot = Number(b.dataset.acctMenu);
+    const a = state.accounts.find((x) => x.slot === slot);
+    if (!a) return;
+    toggleMenu(b, [
+      { label: a.active ? 'deactivate' : 'activate', fn: () => setAccountActive(slot, !a.active) },
+      { label: 'cooldown 5 min', fn: () => cooldownAccount(slot) },
+      { label: 'mark rate-limited', fn: () => setAccountState(slot, 'rate_limited') },
+      { label: 'bind proxy…', fn: () => bindProxyModal(slot) },
+      '-',
+      { label: 'ban', danger: true, fn: () => banAccount(slot) },
+      { label: 'remove', danger: true, fn: () => removeAccount(slot) },
+    ]);
   }));
-  $$('#accounts-table [data-cool]').forEach((b) => b.addEventListener('click', async () => {
-    await api('/api/account/cooldown', { method: 'POST', body: JSON.stringify({ slot: Number(b.dataset.cool), ms: 5 * 60 * 1000 }) });
-    logActivity(`account #${b.dataset.cool} cooled 5m`);
+}
+
+async function setAccountActive(slot, active) {
+  await api('/api/account/active', { method: 'POST', body: JSON.stringify({ slot, active }) });
+  logActivity(`account #${slot} ${active ? 'activated' : 'deactivated'}`);
+  await renderAccounts();
+}
+async function cooldownAccount(slot) {
+  await api('/api/account/cooldown', { method: 'POST', body: JSON.stringify({ slot, ms: 5 * 60 * 1000 }) });
+  logActivity(`account #${slot} cooled 5m`);
+  await renderAccounts();
+}
+async function setAccountState(slot, newState) {
+  await api('/api/account/state', { method: 'POST', body: JSON.stringify({ slot, state: newState }) });
+  logActivity(`account #${slot} marked ${newState}`);
+  await renderAccounts();
+}
+function banAccount(slot) {
+  confirmModal('ban account', `slot #${slot}?`, async () => {
+    await api('/api/account/state', { method: 'POST', body: JSON.stringify({ slot, state: 'banned' }) });
+    logActivity(`account #${slot} banned`);
     await renderAccounts();
-  }));
-  $$('#accounts-table [data-rl]').forEach((b) => b.addEventListener('click', async () => {
-    await api('/api/account/state', { method: 'POST', body: JSON.stringify({ slot: Number(b.dataset.rl), state: 'rate_limited' }) });
-    logActivity(`account #${b.dataset.rl} marked rate_limited`);
-    await renderAccounts();
-  }));
-  $$('#accounts-table [data-ban]').forEach((b) => b.addEventListener('click', () => confirmModal('ban account', `slot #${b.dataset.ban}?`, async () => {
-    await api('/api/account/state', { method: 'POST', body: JSON.stringify({ slot: Number(b.dataset.ban), state: 'banned' }) });
-    logActivity(`account #${b.dataset.ban} banned`);
-    await renderAccounts();
-  })));
-  $$('#accounts-table [data-bind]').forEach((b) => b.addEventListener('click', () => bindProxyModal(Number(b.dataset.bind))));
-  $$('#accounts-table [data-del-acct]').forEach((b) => b.addEventListener('click', () => confirmModal('remove account', `slot #${b.dataset.delAcct}?`, async () => {
-    await api('/api/account', { method: 'DELETE', body: JSON.stringify({ slot: Number(b.dataset.delAcct) }) });
-    logActivity(`account #${b.dataset.delAcct} removed`);
+  });
+}
+function removeAccount(slot) {
+  confirmModal('remove account', `slot #${slot}?`, async () => {
+    await api('/api/account', { method: 'DELETE', body: JSON.stringify({ slot }) });
+    logActivity(`account #${slot} removed`);
     await refreshAll();
-  })));
+  });
 }
 
 function bindProxyModal(slot) {
@@ -583,21 +632,26 @@ function wireEvents() {
     await renderAccounts();
   }));
   $('#account-oauth-btn').addEventListener('click', startOAuthLogin);
-  $('#account-rotate').addEventListener('click', async () => {
-    await api('/api/account/rotate', { method: 'POST', body: '{}' });
-    logActivity('account rotation advanced');
-    await refreshAll();
+  $('#account-menu-btn').addEventListener('click', () => {
+    const items = [
+      { label: 'rotate accounts', fn: async () => {
+        await api('/api/account/rotate', { method: 'POST', body: '{}' });
+        logActivity('account rotation advanced');
+        await refreshAll();
+      } },
+      { label: 'auto-bind proxies', fn: async () => {
+        const r = await api('/api/account/auto-proxy', { method: 'POST', body: '{}' });
+        logActivity(`auto proxy: ${r.assigned} accounts bound across ${r.proxies} proxies`);
+        await renderAccounts();
+      } },
+    ];
+    if (state.bannedCount > 0) items.push('-', { label: `delete banned (${state.bannedCount})`, danger: true, fn: () => confirmModal('delete banned', 'remove all banned accounts?', async () => {
+      const r = await api('/api/account/delete-banned', { method: 'POST', body: '{}' });
+      logActivity(`deleted ${r.removed} banned accounts`);
+      await refreshAll();
+    }) });
+    toggleMenu($('#account-menu-btn'), items);
   });
-  $('#account-auto-proxy').addEventListener('click', async () => {
-    const r = await api('/api/account/auto-proxy', { method: 'POST', body: '{}' });
-    logActivity(`auto proxy: ${r.assigned} accounts bound across ${r.proxies} proxies`);
-    await renderAccounts();
-  });
-  $('#account-delete-banned').addEventListener('click', () => confirmModal('delete banned', 'remove all banned accounts?', async () => {
-    const r = await api('/api/account/delete-banned', { method: 'POST', body: '{}' });
-    logActivity(`deleted ${r.removed} banned accounts`);
-    await refreshAll();
-  }));
   $('#accounts-select-all').addEventListener('change', (e) => {
     $$('#accounts-table .acct-chk').forEach((c) => { c.checked = e.target.checked; });
   });

@@ -124,6 +124,28 @@ body {
 .btn-danger:hover { border-color: var(--red); color: var(--red); }
 .link-btn { background: none; border: none; color: var(--cyan); cursor: pointer; font-size: 12px; font-family: var(--mono); }
 
+/* ============================ overflow menu ============================ */
+.kebab {
+  background: transparent; border: 1px solid transparent; color: var(--muted);
+  cursor: pointer; font-family: var(--mono); font-size: 15px; line-height: 1;
+  padding: 3px 8px; border-radius: 5px; transition: color .12s, border-color .12s, background .12s;
+}
+.kebab:hover { color: var(--amber); border-color: var(--border-hi); background: var(--panel-2); }
+.menu {
+  position: fixed; z-index: 1000; min-width: 160px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--border-hi); border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .55); display: flex; flex-direction: column; gap: 1px;
+}
+.menu-item {
+  display: block; width: 100%; text-align: left; background: transparent; border: none;
+  color: var(--text); font-family: var(--sans); font-size: 12.5px; padding: 7px 10px;
+  border-radius: 5px; cursor: pointer; transition: background .1s, color .1s;
+}
+.menu-item:hover { background: var(--panel-2); color: var(--amber); }
+.menu-item.danger { color: var(--red); }
+.menu-item.danger:hover { background: rgba(229, 83, 75, .12); color: var(--red); }
+.menu-sep { height: 1px; background: var(--border); margin: 4px 6px; }
+
 /* ============================ cards / grid ============================ */
 .stats-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
