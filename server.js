@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { fetch as baseFetch } from 'undici';
 import { ProxyPool, makeProxyConnector, parseProxy } from './proxy.js';
 import * as store from './store.js';
+import { stealthFetch, StealthUnavailableError } from './stealth.js';
 
 // Freebuff engine: OpenAI/Anthropic-compatible routes + session/model lifecycle.
 const { default: handler, internals } = await import('./engine.js');
@@ -201,6 +202,22 @@ function tokenFromInit(init) {
   return null;
 }
 
+// TLS stealth (optional): TLS_STEALTH=1 routes every upstream request through
+// impers/libcurl-impersonate with a real browser TLS + HTTP/2 fingerprint
+// (TLS_PROFILE, default "chrome") instead of undici's OpenSSL-shaped
+// ClientHello. engine.js/quota.js keep calling bare fetch — zero changes.
+const STEALTH = ['1', 'true', 'yes'].includes(String(process.env.TLS_STEALTH || '').toLowerCase());
+// Latched after a fatal stealth failure (libcurl missing/broken): the rest of
+// the process falls back to the plain undici path.
+let stealthDisabled = false;
+
+// Direct (no-proxy) fetch honoring stealth mode, so the VPS egress IP is never
+// paired with the OpenSSL fingerprint when TLS_STEALTH is on.
+function directFetch(input, init) {
+  if (STEALTH && !stealthDisabled) return stealthFetch(input, init, {});
+  return nativeFetch(input, init);
+}
+
 // FREEBUFF_NO_DIRECT=1 → proxy-only: never fall back to a direct connection, so
 // the VPS egress IP is never exposed to upstream (avoids ip_capped / IP linking
 // across accounts). Default (unset) keeps the old direct-fallback behavior.
@@ -211,14 +228,21 @@ globalThis.fetch = function proxiedFetch(input, init = {}) {
   const entry = bound || pool.next();
   if (!entry) {
     if (NO_DIRECT) return Promise.reject(new Error('no proxy available (FREEBUFF_NO_DIRECT=1)'));
-    return nativeFetch(input, init);
+    return directFetch(input, init);
   }
 
   const t0 = Date.now();
-  const attempt = (dispatcher) => nativeFetch(input, { ...init, dispatcher });
-  return attempt(entry.dispatcher).then(
+  const attempt = (e) => {
+    if (STEALTH && !stealthDisabled) return stealthFetch(input, init, { proxy: e.key });
+    return nativeFetch(input, { ...init, dispatcher: e.dispatcher });
+  };
+  return attempt(entry).then(
     (res) => { pool.reportSuccess(entry.key, Date.now() - t0); return res; },
     (err) => {
+      if (err instanceof StealthUnavailableError) {
+        stealthDisabled = true;
+        console.warn('[server] TLS stealth unavailable — falling back to plain fetch for the rest of this run');
+      }
       pool.reportFailure(entry.key);
       if (!isReplayableBody(init.body)) throw err;
       // Fall back to auto-rotation (reportFailure already cooled the failed
@@ -226,17 +250,21 @@ globalThis.fetch = function proxiedFetch(input, init = {}) {
       const next = pool.next();
       if (next) {
         const t1 = Date.now();
-        return attempt(next.dispatcher).then(
+        return attempt(next).then(
           (res) => { pool.reportSuccess(next.key, Date.now() - t1); return res; },
           (err2) => {
+            if (err2 instanceof StealthUnavailableError) {
+              stealthDisabled = true;
+              console.warn('[server] TLS stealth unavailable — falling back to plain fetch for the rest of this run');
+            }
             pool.reportFailure(next.key);
             if (NO_DIRECT) throw err2;
-            return nativeFetch(input, init);
+            return directFetch(input, init);
           },
         );
       }
       if (NO_DIRECT) throw err;
-      return nativeFetch(input, init);
+      return directFetch(input, init);
     },
   );
 };

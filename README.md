@@ -21,6 +21,10 @@ npm install
 node server.js
 ```
 
+On Windows, double-click `install.bat` instead — it checks Node 20+, runs
+`npm install`, creates `.env` from `.env.example`, loads it, and starts the
+server.
+
 Open `http://localhost:8787` for the dashboard. Base URL for clients: `http://localhost:8787/v1`.
 
 ## Configuration
