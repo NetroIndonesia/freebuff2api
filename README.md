@@ -166,11 +166,10 @@ config.example.json / .env.example   example configuration
 
 ## Thanks to
 
-This project stands on these excellent open-source projects:
+Built on these excellent open-source dependencies:
 
 | Project | Role |
 |---|---|
-| [CodebuffAI/freebuff](https://github.com/CodebuffAI/freebuff) | The upstream Freebuff/Codebuff open-source client — the wire protocol, session lifecycle, and model catalog this gateway reimplements (Apache-2.0) |
 | [lexiforest/curl-impersonate](https://github.com/lexiforest/curl-impersonate) | Browser TLS/HTTP2 fingerprint impersonation engine (a fork of [lwthiker/curl-impersonate](https://github.com/lwthiker/curl-impersonate)) |
 | [lexiforest/impers](https://github.com/lexiforest/impers) | Node.js bindings to curl-impersonate via Koffi |
 | [nodejs/undici](https://github.com/nodejs/undici) | HTTP client and the `buildConnector` primitives behind CONNECT/SOCKS proxy tunneling |
