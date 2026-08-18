@@ -150,10 +150,11 @@ function activeTokenList() {
   return state.accounts.filter((a) => a.active).map((a) => (a.uid ? `${a.token}:${a.uid}` : a.token));
 }
 
-// Banned = manual override or upstream-observed ban.
+// Terminal states that must never rotate: manual override or upstream-observed.
+const TERMINAL_STATES = new Set(['banned', 'country_blocked', 'token_invalid']);
 function isAccountBanned(a) {
-  if (a.state === 'banned') return true;
-  return internals.accountHealth()[a.token]?.state === 'banned';
+  if (TERMINAL_STATES.has(a.state)) return true;
+  return TERMINAL_STATES.has(internals.accountHealth()[a.token]?.state);
 }
 
 // Accounts the engine may rotate through: active and not banned.
@@ -721,15 +722,33 @@ let quotaScanning = false;
 const QUOTA_REFRESH_MS = parseInt(process.env.QUOTA_REFRESH_MS || '300000', 10) || 300000;
 try { quotaSnapshot = JSON.parse(store.getSetting('quotaSnapshot', 'null') || 'null'); } catch { quotaSnapshot = null; }
 
-async function refreshQuotaBackground() {
-  if (quotaScanning) return;
-  quotaScanning = true;
-  try {
-    const accounts = state.accounts.filter((a) => a.active).map((a) => ({ token: a.token, uid: a.uid }));
-    if (!accounts.length) { quotaSnapshot = null; return; }
-    const data = await scanQuota(accounts);
-    quotaSnapshot = { data, scannedAt: Date.now() };
-    store.setSetting('quotaSnapshot', JSON.stringify(quotaSnapshot));
+// Feed terminal account states (banned/country_blocked/token_invalid) from the
+// quota scan into the engine's health map, so they are excluded from rotation
+// immediately instead of each being hit with a live 403 first.
+function seedTerminalFromSnapshot() {
+  const accounts = quotaSnapshot?.data?.accounts;
+  if (!Array.isArray(accounts)) return;
+  let seeded = 0;
+  for (const a of accounts) {
+    if (TERMINAL_STATES.has(a.state)) {
+      internals.seedHealth(a.token, a.state);
+      seeded++;
+    }
+  }
+  if (seeded) console.log(`[quota] seeded ${seeded} terminal account(s) from snapshot`);
+}
+seedTerminalFromSnapshot();
+ 
+ async function refreshQuotaBackground() {
+   if (quotaScanning) return;
+   quotaScanning = true;
+   try {
+     const accounts = state.accounts.filter((a) => a.active).map((a) => ({ token: a.token, uid: a.uid }));
+     if (!accounts.length) { quotaSnapshot = null; return; }
+     const data = await scanQuota(accounts);
+     quotaSnapshot = { data, scannedAt: Date.now() };
+     store.setSetting('quotaSnapshot', JSON.stringify(quotaSnapshot));
+    seedTerminalFromSnapshot();
     console.log(`[quota] background scan: ${accounts.length} accounts`);
   } catch (e) {
     console.error('[quota] background scan failed:', e.message);

@@ -2584,6 +2584,22 @@ export const internals = {
     return deleteUpstreamSession(token, s.instanceId).then(() => true);
   },
   accountHealth: () => Object.fromEntries(acctHealth),
+  // Seed a terminal account state from an external observer (the quota scan)
+  // so server.js can exclude banned/country_blocked/token_invalid accounts from
+  // rotation without having to hit each one with a live request first.
+  seedHealth: (token, state) => {
+    if (!token || !["banned", "country_blocked", "token_invalid", "blocked"].includes(state)) return;
+    const previous = acctHealth.get(token) || {};
+    acctHealth.set(token, {
+      ...previous,
+      alive: false,
+      state,
+      uid: previous.uid || null,
+      quota: previous.quota || null,
+      checkedAt: Date.now(),
+    });
+    if (state === "banned") cooldown(token, TERMINAL_COOLDOWN_MS);
+  },
   cooldowns: () => Object.fromEntries(cooldowns),
   cooldown: (token, ms) => cooldown(token, ms),
   failCounts: () => Object.fromEntries(acctFailCount),
