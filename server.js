@@ -800,7 +800,7 @@ function handleUpdateConfig(res, body) {
       store.addAccount(token, uid);
       keep.add(token);
     }
-    for (const a of store.listAccounts()) if (!keep.has(a.token)) store.removeAccount(a.token);
+    for (const a of store.listAccounts()) if (a.active && !keep.has(a.token)) store.removeAccount(a.token);
     reloadAccounts();
   }
   if (isReal(body.apiKey)) state.apiKey = body.apiKey.trim();

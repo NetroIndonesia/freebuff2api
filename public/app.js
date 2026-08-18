@@ -456,8 +456,12 @@ async function saveSettings() {
   const tokens = $('#cfg-tokens').value.split(/\n/).map((t) => t.trim()).filter(Boolean);
   const proxies = $('#cfg-proxies').value.split(/\n/).map((p) => p.trim()).filter(Boolean);
   const key = $('#cfg-apikey').value.trim();
-  if (key) localStorage.setItem('freebuffApiKey', key);
+  if (key && key.length <= 8) {
+    $('#cfg-status').textContent = 'error: api key must be at least 9 characters';
+    return;
+  }
   const body = {
+    apiKey: key,
     tokens,
     proxies,
     debug: $('#cfg-debug').checked,
@@ -474,6 +478,7 @@ async function saveSettings() {
   };
   try {
     const r = await api('/api/config', { method: 'POST', body: JSON.stringify(body) });
+    if (key) localStorage.setItem('freebuffApiKey', key);
     $('#cfg-status').textContent = `saved · ${r.accounts} accounts, ${r.proxies} proxies · rotation ${r.rotation} · stealth ${r.tlsStealth ? 'on' : 'off'}`;
     logActivity(`config saved: ${r.accounts} accounts, ${r.proxies} proxies, stealth ${r.tlsStealth ? 'on' : 'off'}`);
   } catch (e) { $('#cfg-status').textContent = `error: ${e.message}`; logActivity(`config save failed: ${e.message}`, 'err'); }
