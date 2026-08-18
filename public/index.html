@@ -235,6 +235,43 @@
               <span class="switch-track"><span class="switch-thumb"></span></span>
               <span class="switch-label">debug logging</span>
             </label>
+            <div class="settings-divider muted">stealth &amp; anti-ban</div>
+            <label class="switch">
+              <input type="checkbox" id="cfg-stealth" />
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-label">TLS stealth <small class="muted">(browser TLS/HTTP2 fingerprint via libcurl-impersonate)</small></span>
+            </label>
+            <label class="field">
+              <span>TLS profile</span>
+              <input id="cfg-tlsprofile" type="text" placeholder="chrome" />
+            </label>
+            <label class="switch">
+              <input type="checkbox" id="cfg-nodirect" />
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-label">proxy-only (no direct fallback) <small class="muted">(never expose the VPS egress IP)</small></span>
+            </label>
+            <div class="settings-grid">
+              <label class="field">
+                <span>per-account RPM</span>
+                <input id="cfg-acct-rpm" type="number" min="1" />
+              </label>
+              <label class="field">
+                <span>global RPM</span>
+                <input id="cfg-global-rpm" type="number" min="1" />
+              </label>
+              <label class="field">
+                <span>affinity max uses</span>
+                <input id="cfg-affinity" type="number" min="0" />
+              </label>
+              <label class="field">
+                <span>cooldown base (ms)</span>
+                <input id="cfg-cooldown-base" type="number" min="0" />
+              </label>
+              <label class="field">
+                <span>cooldown cap (ms)</span>
+                <input id="cfg-cooldown-cap" type="number" min="0" />
+              </label>
+            </div>
             <div class="settings-actions">
               <button class="btn btn-primary" id="cfg-save">save configuration</button>
               <span class="muted" id="cfg-status"></span>

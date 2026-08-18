@@ -286,6 +286,12 @@ body {
 
 .settings-form { display: flex; flex-direction: column; gap: 16px; max-width: 660px; }
 .settings-actions { display: flex; align-items: center; gap: 14px; }
+.settings-divider {
+  font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .07em; padding-top: 4px;
+  border-top: 1px solid var(--border); margin-top: 2px; padding-top: 12px;
+}
+.settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
 .endpoint-box code {
   display: block; background: var(--bg-2); border: 1px solid var(--border);
   padding: 9px 12px; font-size: 12.5px; color: var(--cyan);

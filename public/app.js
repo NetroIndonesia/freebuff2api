@@ -443,16 +443,39 @@ async function loadSettings() {
   $('#cfg-debug').checked = !!cfg.debug;
   $('#cfg-rotation').checked = cfg.rotation === 'roundrobin';
   $('#cfg-session-rotate').value = cfg.sessionRotateEvery ?? 0;
+  $('#cfg-stealth').checked = !!cfg.tlsStealth;
+  $('#cfg-tlsprofile').value = cfg.tlsProfile || 'chrome';
+  $('#cfg-nodirect').checked = !!cfg.noDirect;
+  $('#cfg-acct-rpm').value = cfg.acctRpm ?? 60;
+  $('#cfg-global-rpm').value = cfg.globalRpm ?? 300;
+  $('#cfg-affinity').value = cfg.affinityMaxUses ?? 3;
+  $('#cfg-cooldown-base').value = cfg.cooldownBaseMs ?? 30000;
+  $('#cfg-cooldown-cap').value = cfg.cooldownCapMs ?? 1800000;
 }
 async function saveSettings() {
   const tokens = $('#cfg-tokens').value.split(/\n/).map((t) => t.trim()).filter(Boolean);
   const proxies = $('#cfg-proxies').value.split(/\n/).map((p) => p.trim()).filter(Boolean);
   const key = $('#cfg-apikey').value.trim();
   if (key) localStorage.setItem('freebuffApiKey', key);
+  const body = {
+    tokens,
+    proxies,
+    debug: $('#cfg-debug').checked,
+    rotation: $('#cfg-rotation').checked ? 'roundrobin' : 'pin',
+    sessionRotateEvery: parseInt($('#cfg-session-rotate').value, 10) || 0,
+    tlsStealth: $('#cfg-stealth').checked,
+    tlsProfile: $('#cfg-tlsprofile').value.trim() || 'chrome',
+    noDirect: $('#cfg-nodirect').checked,
+    acctRpm: parseInt($('#cfg-acct-rpm').value, 10) || 60,
+    globalRpm: parseInt($('#cfg-global-rpm').value, 10) || 300,
+    affinityMaxUses: parseInt($('#cfg-affinity').value, 10) || 0,
+    cooldownBaseMs: parseInt($('#cfg-cooldown-base').value, 10) || 0,
+    cooldownCapMs: parseInt($('#cfg-cooldown-cap').value, 10) || 0,
+  };
   try {
-    const r = await api('/api/config', { method: 'POST', body: JSON.stringify({ tokens, proxies, debug: $('#cfg-debug').checked, rotation: $('#cfg-rotation').checked ? 'roundrobin' : 'pin', sessionRotateEvery: parseInt($('#cfg-session-rotate').value, 10) || 0 }) });
-    $('#cfg-status').textContent = `saved · ${r.accounts} accounts, ${r.proxies} proxies · rotation ${r.rotation}`;
-    logActivity(`config saved: ${r.accounts} accounts, ${r.proxies} proxies, rotation ${r.rotation}`);
+    const r = await api('/api/config', { method: 'POST', body: JSON.stringify(body) });
+    $('#cfg-status').textContent = `saved · ${r.accounts} accounts, ${r.proxies} proxies · rotation ${r.rotation} · stealth ${r.tlsStealth ? 'on' : 'off'}`;
+    logActivity(`config saved: ${r.accounts} accounts, ${r.proxies} proxies, stealth ${r.tlsStealth ? 'on' : 'off'}`);
   } catch (e) { $('#cfg-status').textContent = `error: ${e.message}`; logActivity(`config save failed: ${e.message}`, 'err'); }
 }
 

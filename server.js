@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { fetch as baseFetch } from 'undici';
 import { ProxyPool, makeProxyConnector, parseProxy } from './proxy.js';
 import * as store from './store.js';
-import { stealthFetch, StealthUnavailableError } from './stealth.js';
+import { stealthFetch, StealthUnavailableError, setStealthEnabled, setStealthProfile } from './stealth.js';
 
 // Freebuff engine: OpenAI/Anthropic-compatible routes + session/model lifecycle.
 const { default: handler, internals } = await import('./engine.js');
@@ -96,6 +96,27 @@ migrateLegacy();
 
 // ---- working state (loaded from SQLite) ----
 
+// Resolve a setting: explicit SQLite value first (set via the dashboard),
+// then the matching env var, then the default. Empty SQLite string = unset.
+function settingBool(key, envName, def) {
+  const s = store.getSetting(key, '');
+  if (s === 'true' || s === 'false') return s === 'true';
+  if (process.env[envName] !== undefined) return ['1', 'true', 'yes'].includes(String(process.env[envName]).toLowerCase());
+  return def;
+}
+function settingInt(key, envName, def) {
+  const s = store.getSetting(key, '');
+  if (s !== '') { const n = parseInt(s, 10); if (!Number.isNaN(n)) return n; }
+  if (process.env[envName] !== undefined) { const n = parseInt(process.env[envName], 10); if (!Number.isNaN(n)) return n; }
+  return def;
+}
+function settingStr(key, envName, def) {
+  const s = store.getSetting(key, '');
+  if (s !== '') return s;
+  if (process.env[envName]) return process.env[envName];
+  return def;
+}
+
 let state = {
   accounts: store.listAccounts(),   // { token, uid, active, proxy, state, addedAt }
   proxies: JSON.parse(store.getSetting('proxies', '[]') || '[]'),
@@ -104,8 +125,25 @@ let state = {
   rotation: store.getSetting('rotation', 'pin'),
   sessionRotateEvery: parseInt(store.getSetting('sessionRotateEvery', '0'), 10) || 0,
   proxyAutoRefresh: store.getSetting('proxyAutoRefresh', 'false') === 'true',
+  // TLS stealth + egress (dashboard-tunable, env fallback)
+  tlsStealth: settingBool('tlsStealth', 'TLS_STEALTH', false),
+  tlsProfile: settingStr('tlsProfile', 'TLS_PROFILE', 'chrome'),
+  noDirect: settingBool('noDirect', 'FREEBUFF_NO_DIRECT', false),
+  // Anti-ban tunables (engine.js reads these per request via the env getters)
+  acctRpm: settingInt('acctRpm', 'FREEBUFF_ACCT_RPM', 60),
+  globalRpm: settingInt('globalRpm', 'FREEBUFF_GLOBAL_RPM', 300),
+  affinityMaxUses: settingInt('affinityMaxUses', 'FREEBUFF_AFFINITY_MAX_USES', 3),
+  cooldownBaseMs: settingInt('cooldownBaseMs', 'FREEBUFF_COOLDOWN_BASE_MS', 30000),
+  cooldownCapMs: settingInt('cooldownCapMs', 'FREEBUFF_COOLDOWN_CAP_MS', 1800000),
 };
 
+// Seed the stealth layer from the resolved state; re-called on config update.
+// (stealth.js gates on its own mutable flag, so it must be synced here.)
+function applyStealthState() {
+  setStealthEnabled(state.tlsStealth);
+  setStealthProfile(state.tlsProfile);
+}
+applyStealthState();
 // Active accounts only — shown in settings/status. Banned accounts stay listed
 // here so the operator can inspect/delete them, but are excluded from rotation.
 function activeTokenList() {
@@ -124,7 +162,6 @@ function rotationTokenList() {
     .filter((a) => a.active && !isAccountBanned(a))
     .map((a) => (a.uid ? `${a.token}:${a.uid}` : a.token));
 }
-
 function persistSettings() {
   store.setSetting('apiKey', state.apiKey);
   store.setSetting('debug', String(state.debug));
@@ -132,6 +169,14 @@ function persistSettings() {
   store.setSetting('sessionRotateEvery', String(state.sessionRotateEvery));
   store.setSetting('proxyAutoRefresh', String(state.proxyAutoRefresh));
   store.setSetting('proxies', JSON.stringify(state.proxies));
+  store.setSetting('tlsStealth', String(state.tlsStealth));
+  store.setSetting('tlsProfile', state.tlsProfile);
+  store.setSetting('noDirect', String(state.noDirect));
+  store.setSetting('acctRpm', String(state.acctRpm));
+  store.setSetting('globalRpm', String(state.globalRpm));
+  store.setSetting('affinityMaxUses', String(state.affinityMaxUses));
+  store.setSetting('cooldownBaseMs', String(state.cooldownBaseMs));
+  store.setSetting('cooldownCapMs', String(state.cooldownCapMs));
 }
 
 function reloadAccounts() {
@@ -163,12 +208,12 @@ const env = {
   get FREEBUFF_DEBUG() { return String(state.debug); },
   get ROTATION_MODE() { return state.rotation; },
   get SESSION_ROTATE_EVERY() { return String(state.sessionRotateEvery); },
-  // Anti-ban tunables (operator env vars; engine.js reads them per request).
-  get FREEBUFF_ACCT_RPM() { return process.env.FREEBUFF_ACCT_RPM || '60'; },
-  get FREEBUFF_GLOBAL_RPM() { return process.env.FREEBUFF_GLOBAL_RPM || '300'; },
-  get FREEBUFF_AFFINITY_MAX_USES() { return process.env.FREEBUFF_AFFINITY_MAX_USES || '3'; },
-  get FREEBUFF_COOLDOWN_BASE_MS() { return process.env.FREEBUFF_COOLDOWN_BASE_MS || '30000'; },
-  get FREEBUFF_COOLDOWN_CAP_MS() { return process.env.FREEBUFF_COOLDOWN_CAP_MS || '1800000'; },
+  // Anti-ban tunables (dashboard-tunable; engine.js reads them per request).
+  get FREEBUFF_ACCT_RPM() { return String(state.acctRpm); },
+  get FREEBUFF_GLOBAL_RPM() { return String(state.globalRpm); },
+  get FREEBUFF_AFFINITY_MAX_USES() { return String(state.affinityMaxUses); },
+  get FREEBUFF_COOLDOWN_BASE_MS() { return String(state.cooldownBaseMs); },
+  get FREEBUFF_COOLDOWN_CAP_MS() { return String(state.cooldownCapMs); },
 };
 
 // --------------------------------------------------------------- proxy pool --
@@ -202,38 +247,37 @@ function tokenFromInit(init) {
   return null;
 }
 
-// TLS stealth (optional): TLS_STEALTH=1 routes every upstream request through
+// TLS stealth (optional): routes every upstream request through
 // impers/libcurl-impersonate with a real browser TLS + HTTP/2 fingerprint
-// (TLS_PROFILE, default "chrome") instead of undici's OpenSSL-shaped
-// ClientHello. engine.js/quota.js keep calling bare fetch — zero changes.
-const STEALTH = ['1', 'true', 'yes'].includes(String(process.env.TLS_STEALTH || '').toLowerCase());
+// (state.tlsProfile) instead of undici's OpenSSL-shaped ClientHello.
+// engine.js/quota.js keep calling bare fetch — zero changes. Toggled live from
+// the dashboard (state.tlsStealth); see stealth.js setStealthEnabled.
 // Latched after a fatal stealth failure (libcurl missing/broken): the rest of
 // the process falls back to the plain undici path.
 let stealthDisabled = false;
 
 // Direct (no-proxy) fetch honoring stealth mode, so the VPS egress IP is never
-// paired with the OpenSSL fingerprint when TLS_STEALTH is on.
+// paired with the OpenSSL fingerprint when stealth is on.
 function directFetch(input, init) {
-  if (STEALTH && !stealthDisabled) return stealthFetch(input, init, {});
+  if (state.tlsStealth && !stealthDisabled) return stealthFetch(input, init, {});
   return nativeFetch(input, init);
 }
 
-// FREEBUFF_NO_DIRECT=1 → proxy-only: never fall back to a direct connection, so
-// the VPS egress IP is never exposed to upstream (avoids ip_capped / IP linking
-// across accounts). Default (unset) keeps the old direct-fallback behavior.
-const NO_DIRECT = String(process.env.FREEBUFF_NO_DIRECT || '').toLowerCase() === 'true';
+// Proxy-only mode (state.noDirect): never fall back to a direct connection
+// when proxies fail, so the VPS egress IP is never exposed upstream (avoids
+// ip_capped / IP linking across accounts).
 
 globalThis.fetch = function proxiedFetch(input, init = {}) {
   const bound = pool.bindingDispatcher(tokenFromInit(init));
   const entry = bound || pool.next();
   if (!entry) {
-    if (NO_DIRECT) return Promise.reject(new Error('no proxy available (FREEBUFF_NO_DIRECT=1)'));
+    if (state.noDirect) return Promise.reject(new Error('no proxy available (FREEBUFF_NO_DIRECT=1)'));
     return directFetch(input, init);
   }
 
   const t0 = Date.now();
   const attempt = (e) => {
-    if (STEALTH && !stealthDisabled) return stealthFetch(input, init, { proxy: e.key });
+    if (state.tlsStealth && !stealthDisabled) return stealthFetch(input, init, { proxy: e.key });
     return nativeFetch(input, { ...init, dispatcher: e.dispatcher });
   };
   return attempt(entry).then(
@@ -258,12 +302,12 @@ globalThis.fetch = function proxiedFetch(input, init = {}) {
               console.warn('[server] TLS stealth unavailable — falling back to plain fetch for the rest of this run');
             }
             pool.reportFailure(next.key);
-            if (NO_DIRECT) throw err2;
+            if (state.noDirect) throw err2;
             return directFetch(input, init);
           },
         );
       }
-      if (NO_DIRECT) throw err;
+      if (state.noDirect) throw err;
       return directFetch(input, init);
     },
   );
@@ -713,6 +757,14 @@ function handleConfig(res) {
     rotation: state.rotation,
     sessionRotateEvery: state.sessionRotateEvery,
     proxyAutoRefresh: state.proxyAutoRefresh,
+    tlsStealth: state.tlsStealth,
+    tlsProfile: state.tlsProfile,
+    noDirect: state.noDirect,
+    acctRpm: state.acctRpm,
+    globalRpm: state.globalRpm,
+    affinityMaxUses: state.affinityMaxUses,
+    cooldownBaseMs: state.cooldownBaseMs,
+    cooldownCapMs: state.cooldownCapMs,
   });
 }
 
@@ -739,6 +791,18 @@ function handleUpdateConfig(res, body) {
     state.sessionRotateEvery = Math.max(0, parseInt(String(body.sessionRotateEvery), 10) || 0);
   }
   if (typeof body.proxyAutoRefresh === 'boolean') state.proxyAutoRefresh = body.proxyAutoRefresh;
+  if (typeof body.tlsStealth === 'boolean') state.tlsStealth = body.tlsStealth;
+  if (typeof body.tlsProfile === 'string' && body.tlsProfile.trim()) state.tlsProfile = body.tlsProfile.trim();
+  if (typeof body.noDirect === 'boolean') state.noDirect = body.noDirect;
+  const setInt = (key, val, min, max) => {
+    const n = parseInt(String(val), 10);
+    if (Number.isFinite(n)) state[key] = Math.min(max, Math.max(min, n));
+  };
+  if (body.acctRpm !== undefined) setInt('acctRpm', body.acctRpm, 1, 100000);
+  if (body.globalRpm !== undefined) setInt('globalRpm', body.globalRpm, 1, 1000000);
+  if (body.affinityMaxUses !== undefined) setInt('affinityMaxUses', body.affinityMaxUses, 0, 100000);
+  if (body.cooldownBaseMs !== undefined) setInt('cooldownBaseMs', body.cooldownBaseMs, 0, 86400000);
+  if (body.cooldownCapMs !== undefined) setInt('cooldownCapMs', body.cooldownCapMs, 0, 86400000);
   if (Array.isArray(body.proxies)) {
     pool.clear();
     state.proxies = [];
@@ -754,7 +818,8 @@ function handleUpdateConfig(res, body) {
     reloadAccounts();
   }
   persistSettings();
-  json(res, { ok: true, accounts: state.accounts.length, proxies: state.proxies.length, apiKey: mask(state.apiKey), rotation: state.rotation, sessionRotateEvery: state.sessionRotateEvery, proxyAutoRefresh: state.proxyAutoRefresh });
+  applyStealthState();
+  json(res, { ok: true, accounts: state.accounts.length, proxies: state.proxies.length, apiKey: mask(state.apiKey), rotation: state.rotation, sessionRotateEvery: state.sessionRotateEvery, proxyAutoRefresh: state.proxyAutoRefresh, tlsStealth: state.tlsStealth });
 }
 
 // ----------------------------------------------------------------- static ----

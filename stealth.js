@@ -40,10 +40,26 @@ const PROFILE_ALIASES = {
   safari_ios: 'safari260_ios',
 };
 
-const STEALTH = ['1', 'true', 'yes'].includes(String(process.env.TLS_STEALTH || '').toLowerCase());
+// Mutable so the dashboard can toggle stealth at runtime without a restart.
+// server.js seeds this from config/SQLite at boot and calls the setters on
+// every config update.
+let enabled = false;
 let profile = process.env.TLS_PROFILE || 'chrome';
 
-export const stealthEnabled = STEALTH;
+export function setStealthEnabled(value) {
+  enabled = ['1', 'true', 'yes'].includes(String(value).toLowerCase());
+  return enabled;
+}
+
+export function setStealthProfile(value) {
+  const v = String(value || '').trim();
+  if (v) profile = v;
+  return profile;
+}
+
+export function isStealthEnabled() {
+  return enabled;
+}
 
 // Fatal, non-transient: libcurl-impersonate missing/broken. server.js latches
 // this and falls back to plain undici fetch for the rest of the process.
@@ -129,7 +145,7 @@ let readyPromise = null;
 let warnedProfile = false;
 
 async function ensureReady() {
-  if (!STEALTH) throw new StealthUnavailableError('TLS_STEALTH is disabled');
+  if (!enabled) throw new StealthUnavailableError('TLS_STEALTH is disabled');
   if (!readyPromise) {
     readyPromise = (async () => {
       const { resolveLibrary, NATIVE_IMPERSONATE_TARGETS } = await loadImpers();
