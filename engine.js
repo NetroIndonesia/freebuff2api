@@ -1330,18 +1330,17 @@ function normalizeMessages(messages) {
 // Ladder (ascending): minimal < low < medium < high < xhigh < max < ultra
 const REASONING_EFFORT_RANK = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
-// Per-model efforts:
-//   - deepseek-v4-flash: [low, high, max] (no medium)
-//   - deepseek-v4-pro:   [high, max]
-//   - gpt-5.6-luna:      EFFORTS_THROUGH_MAX（low..max）
-//   - muse-spark:        EFFORTS_THROUGH_XHIGH（low..xhigh，ALWAYS reasons，none=400）
+// Per-model efforts (synced with upstream common/src/constants):
+//   - deepseek-v4-{flash,pro}: [low, high, max] (no medium; Pro 08/13 build maps low natively)
+//   - gpt-5.6-luna:      EFFORTS_THROUGH_MAX (low..max)
+//   - muse-spark:        EFFORTS_THROUGH_XHIGH (minimal..xhigh, ALWAYS reasons, none=400)
 //   - minimax-m3:        no effort (adaptive thinking)
 //   - unlisted models: pass through unchanged
 const MODEL_EFFORTS = {
   "deepseek/deepseek-v4-flash": ["low", "high", "max"],
-  "deepseek/deepseek-v4-pro": ["high", "max"],
-  "openai/gpt-5.6-luna": ["low", "medium", "high", "max"],
-  "meta/muse-spark-1.2-contributor": ["low", "medium", "high", "xhigh"],
+  "deepseek/deepseek-v4-pro": ["low", "high", "max"],
+  "openai/gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
+  "meta/muse-spark-1.2-contributor": ["minimal", "low", "medium", "high", "xhigh"],
 };
 
 function clampReasoningEffort(requested, allowed) {
