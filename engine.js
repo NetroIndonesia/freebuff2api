@@ -1084,10 +1084,12 @@ function deviceProfile(token) {
 // Native runtime UAs look bot-like to ad networks; the CLI sends this instead.
 function browserUserAgent(os) {
   const key = os === "macos" ? "darwin" : os === "windows" ? "win32" : "linux";
+  // Matches upstream common/src/util/ad-user-agent.ts AD_CHROME_VERSION (151).
+  // A stale Chrome version is itself a bot fingerprint upstream flags.
   const map = {
-    darwin: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    win32: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    linux: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    darwin: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    win32: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    linux: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
   };
   return map[key] || map.linux;
 }
@@ -1417,8 +1419,9 @@ function buildUpstreamPayload(params, mc, sess, runId) {
     freebuff_instance_id: sess.instanceId,
     trace_session_id: crypto.randomUUID(),
     run_id: runId,
-    // client_id = session-stable identifier
-    client_id: stableFingerprint(runId || "session"),
+    // client_id = the SDK's promptId: Math.random().toString(36).substring(2, 15)
+    // (a fresh base36 id per request, NOT the enhanced fingerprint).
+    client_id: Math.random().toString(36).substring(2, 15),
     cost_mode: "free",
   };
   return payload;
