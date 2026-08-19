@@ -6,7 +6,8 @@
   "description": "Freebuff/codebuff free models → OpenAI/Anthropic compatible API with proxy pools, session management and dashboard",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "check:upstream": "node check-upstream.js"
   },
   "engines": {
     "node": ">=20"

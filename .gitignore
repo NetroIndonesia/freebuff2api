@@ -8,6 +8,9 @@ config.json
 credentials/
 proxies.txt
 
+# upstream drift watchdog state
+.upstream-snapshot.json
+
 # sqlite database (holds account tokens)
 data.db
 data.db-shm
