@@ -386,6 +386,96 @@ async function handleStatus(res) {
   });
 }
 
+// Prometheus text exposition, public like /healthz. Exposes aggregate counts
+// plus per-proxy state (host/port labels only — never credentials or URLs).
+function handleMetrics(res) {
+  const health = internals.accountHealth();
+  const accountStates = {};
+  let alive = 0, unhealthy = 0, unknown = 0, inactive = 0;
+  for (const a of state.accounts) {
+    const h = health[a.token];
+    if (!a.active) { inactive++; continue; }
+    const s = a.state && a.state !== 'unknown' ? a.state : (h?.state || 'unknown');
+    accountStates[s] = (accountStates[s] || 0) + 1;
+    if (s === 'banned' || s === 'rate_limited') unhealthy++;
+    else if (h?.alive === true) alive++;
+    else if (h?.alive === false) unhealthy++;
+    else unknown++;
+  }
+  const proxies = pool.list();
+  const ready = proxies.filter((p) => p.state === 'ready').length;
+  const sessions = internals.sessions();
+  const models = internals.modelTableCached();
+
+  const out = [];
+  const declared = new Set();
+  const declare = (name, help, type) => {
+    if (declared.has(name)) return;
+    declared.add(name);
+    out.push(`# HELP ${name} ${help}`);
+    out.push(`# TYPE ${name} ${type}`);
+  };
+  const esc = (v) => String(v).replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/"/g, '\\"');
+  const sample = (name, labels, value) => {
+    const lbl = labels && Object.keys(labels).length
+      ? '{' + Object.entries(labels).map(([k, v]) => `${k}="${esc(v)}"`).join(',') + '}'
+      : '';
+    out.push(`${name}${lbl} ${value}`);
+  };
+
+  declare('freebuff2api_build_info', 'Freebuff2api build metadata.', 'gauge');
+  sample('freebuff2api_build_info', { version: '2.0.0', engine: internals.version }, 1);
+  declare('freebuff2api_uptime_seconds', 'Process uptime in seconds.', 'gauge');
+  sample('freebuff2api_uptime_seconds', null, Math.floor((Date.now() - startedAt) / 1000));
+
+  declare('freebuff2api_accounts_total', 'Total accounts in the pool.', 'gauge');
+  sample('freebuff2api_accounts_total', null, state.accounts.length);
+  declare('freebuff2api_accounts_active', 'Active accounts.', 'gauge');
+  sample('freebuff2api_accounts_active', null, state.accounts.length - inactive);
+  declare('freebuff2api_accounts_inactive', 'Inactive accounts.', 'gauge');
+  sample('freebuff2api_accounts_inactive', null, inactive);
+  declare('freebuff2api_accounts_observed', 'Accounts with a cached health observation.', 'gauge');
+  sample('freebuff2api_accounts_observed', null, Object.keys(health).length);
+  declare('freebuff2api_accounts_state', 'Active accounts by state.', 'gauge');
+  for (const [s, n] of Object.entries(accountStates)) sample('freebuff2api_accounts_state', { state: s }, n);
+  declare('freebuff2api_accounts_alive', 'Accounts observed alive.', 'gauge');
+  sample('freebuff2api_accounts_alive', null, alive);
+  declare('freebuff2api_accounts_unhealthy', 'Accounts in unhealthy or terminal state.', 'gauge');
+  sample('freebuff2api_accounts_unhealthy', null, unhealthy);
+  declare('freebuff2api_accounts_unknown', 'Accounts with unknown health.', 'gauge');
+  sample('freebuff2api_accounts_unknown', null, unknown);
+
+  declare('freebuff2api_proxies_total', 'Total proxies in the pool.', 'gauge');
+  sample('freebuff2api_proxies_total', null, proxies.length);
+  declare('freebuff2api_proxies_ready', 'Proxies currently ready.', 'gauge');
+  sample('freebuff2api_proxies_ready', null, ready);
+  declare('freebuff2api_proxy_up', 'Whether a proxy is ready (1) or cooling down (0).', 'gauge');
+  declare('freebuff2api_proxy_latency_ms', 'Last measured proxy latency in milliseconds.', 'gauge');
+  declare('freebuff2api_proxy_fails', 'Consecutive proxy failures.', 'gauge');
+  for (const p of proxies) {
+    const lbl = { protocol: p.protocol, host: p.host || '', port: p.port != null ? p.port : '' };
+    sample('freebuff2api_proxy_up', lbl, p.state === 'ready' ? 1 : 0);
+    if (p.latencyMs != null) sample('freebuff2api_proxy_latency_ms', lbl, p.latencyMs);
+    sample('freebuff2api_proxy_fails', lbl, p.fails);
+  }
+
+  declare('freebuff2api_sessions_active', 'Active cached upstream sessions.', 'gauge');
+  sample('freebuff2api_sessions_active', null, sessions.length);
+  declare('freebuff2api_models_total', 'Models in the resolved catalog.', 'gauge');
+  sample('freebuff2api_models_total', null, models.length);
+  if (quotaSnapshot?.scannedAt) {
+    declare('freebuff2api_quota_scanned_timestamp_seconds', 'Unix timestamp of the last quota scan.', 'gauge');
+    sample('freebuff2api_quota_scanned_timestamp_seconds', null, Math.floor(quotaSnapshot.scannedAt / 1000));
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'no-store',
+  });
+  res.end(out.join('\n') + '\n');
+}
+
 function handleAccounts(res) {
   const health = internals.accountHealth();
   const cooldowns = internals.cooldowns();
@@ -902,8 +992,8 @@ const server = createServer(async (nodeReq, res) => {
   const rawBody = Buffer.concat(chunks);
 
   // --- management API (no key required for monitoring endpoints) ---
-  const publicApi = ['/healthz', '/api/status'];
-  const isManagement = pathname.startsWith('/api/');
+  const publicApi = ['/healthz', '/api/status', '/metrics'];
+  const isManagement = pathname.startsWith('/api/') || pathname === '/metrics';
   if (isManagement || pathname === '/healthz') {
     if (!publicApi.includes(pathname)) {
       const authReq = new Request('http://localhost', { headers: new Headers(nodeReq.headers) });
@@ -954,6 +1044,7 @@ function safeParse(buf) {
 function routeManagement(pathname, method, res, body, query = new URLSearchParams()) {
   switch (pathname) {
     case '/healthz': return handleStatus(res);
+    case '/metrics': return handleMetrics(res);
     case '/api/status': return handleStatus(res);
     case '/api/accounts': return handleAccounts(res);
     case '/api/account': return method === 'DELETE' ? handleRemoveAccount(res, body) : handleAddAccount(res, body);

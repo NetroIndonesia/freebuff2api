@@ -133,6 +133,7 @@ The dashboard uses these endpoints (most require the API key via `x-api-key` or 
 | Endpoint | Method | Description |
 |---|---|---|
 | `/healthz`, `/api/status` | GET | Service + account/proxy/session health (no auth) |
+| `/metrics` | GET | Prometheus metrics — accounts, proxies, sessions, models, quota (no auth) |
 | `/api/accounts` | GET | Account list with health state |
 | `/api/models` | GET | Resolved model registry |
 | `/api/sessions` | GET | Active cached sessions |
