@@ -33,7 +33,7 @@ A self-hosted gateway that exposes **Freebuff / Codebuff free coding models** as
 
 ```mermaid
 graph TD
-    Client[AI client / router<br/>OpenAI & Anthropic SDKs] -->|POST /v1/chat/completions| Proxy[freebuff2api<br/>localhost:8787]
+    Client[AI client / router<br/>OpenAI & Anthropic SDKs] -->|POST /v1/chat/completions| Proxy[freebuff2api<br/>localhost:1430]
     Proxy -->|1. pick account + proxy| Pool[Account pool + proxy pool]
     Pool -->|2. session & run lifecycle| Upstream[codebuff.com]
     Upstream -->|3. SSE stream| Proxy
@@ -57,7 +57,7 @@ node server.js
 
 On Windows, double-click `install.bat` instead — it checks Node 20+, runs `npm install`, creates `.env` from `.env.example`, loads it, and starts the server.
 
-Open `http://localhost:8787` for the dashboard. Base URL for clients: `http://localhost:8787/v1`.
+Open `http://localhost:1430` for the dashboard. Base URL for clients: `http://localhost:1430/v1`.
 
 **Requirements:** Node.js ≥ 20.
 
@@ -81,7 +81,7 @@ Config is read from three file sources (merged, later wins): `config.json` → `
 | `FREEBUFF_COOLDOWN_BASE_MS` | `30000` | Stepped backoff base |
 | `FREEBUFF_COOLDOWN_CAP_MS` | `1800000` | Stepped backoff cap |
 | `FREEBUFF_DEBUG` | `false` | Enable debug logs |
-| `PORT` / `HOST` | `0.0.0.0:8787` | Listen address |
+| `PORT` / `HOST` | `0.0.0.0:1430` | Listen address |
 | `QUOTA_REFRESH_MS` | `300000` | Background quota-scan interval |
 | `PROXY_REFRESH_MS` | `60000` | Background proxy health re-test interval |
 
@@ -146,7 +146,7 @@ The dashboard uses these endpoints (most require the API key via `x-api-key` or 
 
 ## Client integration
 
-- **Base URL**: `http://host:8787/v1`
+- **Base URL**: `http://host:1430/v1`
 - **API Key**: `FREEBUFF_API_KEY` (default `freebuff-default-key`)
 
 Works with any OpenAI SDK, Anthropic SDK, ChatGPT-Next-Web, LobeChat, one-api, and similar routers.

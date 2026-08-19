@@ -969,7 +969,7 @@ async function pipeWorker(request, res) {
 
 // ----------------------------------------------------------------- server ----
 
-const port = parseInt(process.env.PORT || '8787', 10);
+const port = parseInt(process.env.PORT || '1430', 10);
 const host = process.env.HOST || '0.0.0.0';
 
 const server = createServer(async (nodeReq, res) => {

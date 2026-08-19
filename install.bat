@@ -57,9 +57,9 @@ for /f "usebackq eol=# tokens=1,* delims==" %%a in (".env") do (
 
 REM ---------------------------------------------------------------- start --
 echo.
-echo  Starting freebuff2api on http://localhost:8787
-echo    Dashboard : http://localhost:8787
-echo    API base  : http://localhost:8787/v1
+echo  Starting freebuff2api on http://localhost:1430
+echo    Dashboard : http://localhost:1430
+echo    API base  : http://localhost:1430/v1
 echo    (Ctrl+C to stop)
 echo.
 node server.js
