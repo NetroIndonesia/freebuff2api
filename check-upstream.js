@@ -39,6 +39,14 @@ const SOURCES = {
     "https://raw.githubusercontent.com/CodebuffAI/freebuff/main/common/src/constants/freebuff-model-ids.ts",
     "https://cdn.jsdelivr.net/gh/CodebuffAI/freebuff@main/common/src/constants/freebuff-model-ids.ts",
   ],
+  ads: [
+    "https://raw.githubusercontent.com/CodebuffAI/freebuff/main/common/src/util/ad-user-agent.ts",
+    "https://cdn.jsdelivr.net/gh/CodebuffAI/freebuff@main/common/src/util/ad-user-agent.ts",
+  ],
+  adsFlow: [
+    "https://raw.githubusercontent.com/CodebuffAI/freebuff/main/cli/src/hooks/use-gravity-ad.ts",
+    "https://cdn.jsdelivr.net/gh/CodebuffAI/freebuff@main/cli/src/hooks/use-gravity-ad.ts",
+  ],
 };
 
 // The free-mode marker the upstream server requires at position 0 of the
@@ -170,6 +178,30 @@ function parseModelEfforts(src, modelIdConstants) {
   return out;
 }
 
+// ---- ad-chain parsing (engine.js runNormalClientBehavior / browserUserAgent) ----
+
+// Browser UA version the engine must send to ad providers. Upstream treats a
+// stale Chrome version as a bot fingerprint (see ad-user-agent.ts).
+function parseAdChromeVersion(src) {
+  const m = /const AD_CHROME_VERSION = ['"]([^'"]+)['"]/.exec(src || "");
+  return m ? m[1] : null;
+}
+
+// Zeroclick impressions URL + provider/surface unions from use-gravity-ad.ts.
+function parseAdFlow(src) {
+  if (!src) return { zeroclickUrl: null, providers: null, surfaces: null };
+  const url = /ZEROCLICK_IMPRESSIONS_URL = ['"]([^'"]+)['"]/.exec(src);
+  const providers = /type AdProvider = ([^\n]+)/.exec(src);
+  const surfaces = /type AdSurface = ([^\n]+)/.exec(src);
+  const norm = (s) =>
+    s ? [...s.matchAll(/'([^']+)'/g)].map((m) => m[1]).join(",") : null;
+  return {
+    zeroclickUrl: url ? url[1] : null,
+    providers: norm(providers ? providers[1] : null),
+    surfaces: norm(surfaces ? surfaces[1] : null),
+  };
+}
+
 // ---- snapshot ----
 
 function loadSnapshot() {
@@ -182,10 +214,12 @@ function loadSnapshot() {
 // ---- main ----
 
 async function main() {
-  const [agentsSrc, modelsSrc, idsSrc] = await Promise.all([
+  const [agentsSrc, modelsSrc, idsSrc, adsSrc, adsFlowSrc] = await Promise.all([
     fetchText(SOURCES.agents),
     fetchText(SOURCES.models),
     fetchText(SOURCES.ids),
+    fetchText(SOURCES.ads),
+    fetchText(SOURCES.adsFlow),
   ]);
 
   const problems = [];
@@ -225,6 +259,10 @@ async function main() {
     parserFellBack,
     models: Object.fromEntries(table.map((m) => [m.id, classify(m.id)])),
     efforts: parseModelEfforts(modelsSrc || "", modelIdConstants),
+    ad: {
+      chromeVersion: parseAdChromeVersion(adsSrc || ""),
+      ...parseAdFlow(adsFlowSrc || ""),
+    },
   };
 
   // 4) Diff against last snapshot.
@@ -253,6 +291,20 @@ async function main() {
         changes.push(`[EFFORT] ${id}: ${prevEfforts[id].join("/")} -> ${ladder.join("/")}`);
       }
     }
+    // ad-chain drift (browser UA version / zeroclick URL / provider-surface set)
+    const prevAd = prev.ad || {};
+    if (prevAd.chromeVersion && current.ad.chromeVersion && prevAd.chromeVersion !== current.ad.chromeVersion) {
+      changes.push(`[AD] browser UA Chrome ${prevAd.chromeVersion} -> ${current.ad.chromeVersion} (update engine.js browserUserAgent)`);
+    }
+    if (prevAd.zeroclickUrl && current.ad.zeroclickUrl && prevAd.zeroclickUrl !== current.ad.zeroclickUrl) {
+      changes.push(`[AD] zeroclick URL ${prevAd.zeroclickUrl} -> ${current.ad.zeroclickUrl} (update engine.js ZEROCLICK_IMPRESSIONS_URL)`);
+    }
+    if (prevAd.providers && current.ad.providers && prevAd.providers !== current.ad.providers) {
+      changes.push(`[AD] providers ${prevAd.providers} -> ${current.ad.providers}`);
+    }
+    if (prevAd.surfaces && current.ad.surfaces && prevAd.surfaces !== current.ad.surfaces) {
+      changes.push(`[AD] surfaces ${prevAd.surfaces} -> ${current.ad.surfaces}`);
+    }
   } else {
     notes.push("first run — snapshot created, no baseline to diff yet");
   }
@@ -267,6 +319,11 @@ async function main() {
   for (const [id, ladder] of Object.entries(current.efforts)) {
     console.log(`    - ${id}: ${ladder ? ladder.join("/") : "(none)"}`);
   }
+  console.log("  ad chain:");
+  console.log(`    - browser UA: Chrome ${current.ad.chromeVersion || "?"}`);
+  console.log(`    - providers:  ${current.ad.providers || "?"}`);
+  console.log(`    - surfaces:   ${current.ad.surfaces || "?"}`);
+  console.log(`    - zeroclick:  ${current.ad.zeroclickUrl || "(none)"}`);
 
   if (changes.length) {
     console.log("\nIMPORTANT CHANGES:");

@@ -1095,28 +1095,52 @@ function browserUserAgent(os) {
 }
 
 
-// Ad chain: POST /ads fetch → if impUrl is present, POST /ads/impression reports the impression.
-// Ad chain: Freebuff-CLI/<version> UA;
-// body {provider:"gravity", surface, sessionId, device, userAgent}; impression {impUrl, mode}
+// Ad chain (matches upstream cli/src/hooks/use-gravity-ad.ts):
+//   POST /api/v1/ads (auction) -> report the impression when an ad fills.
+// Providers: gravity | carbon | zeroclick — we request gravity first and the
+// server owns fallback ordering; the response carries the actual provider.
+// Impression: zeroclick ads also POST impressionIds to zeroclick.dev (no
+// Freebuff auth on that domain); every ad then reports
+// { impUrl, mode, userAgent, os } to /api/v1/ads/impression so the server
+// fires Gravity's pixel with a browser UA instead of the CLI header.
+const CLI_AD_UA = "Freebuff-CLI/0.0.140"; // bump when upstream ships a new CLI
+const ZEROCLICK_IMPRESSIONS_URL = "https://zeroclick.dev/api/v2/impressions";
+
 async function runNormalClientBehavior(token, clientFingerprint) {
   const failures = [];
   // 1) pull ads + impression (30min throttle)
   if (behaviorDue("ads:" + token)) {
     try {
       const device = deviceProfile(token);
+      const browserUa = browserUserAgent(device.os);
       const ad = await enqueueUp("POST", "/api/v1/ads", token, {
         provider: "gravity",
         messages: [], // waiting_room surface has no chat history yet (real CLI sends converted history)
         sessionId: crypto.randomUUID(),
         surface: "waiting_room",
         device,
-        userAgent: browserUserAgent(device.os),
-      }, { "User-Agent": "Freebuff-CLI/0.0.138", "Content-Type": "application/json" }, 6000);
-      const impUrl = ad.data && Array.isArray(ad.data.ads) && ad.data.ads[0] && ad.data.ads[0].impUrl;
-      if (ad.status === 200 && impUrl) {
-        await enqueueUp("POST", "/api/v1/ads/impression", token,
-          { impUrl, mode: "free" },
-          { "User-Agent": "Freebuff-CLI/0.0.138", "Content-Type": "application/json" }, 6000);
+        userAgent: browserUa,
+      }, { "User-Agent": CLI_AD_UA, "Content-Type": "application/json" }, 6000);
+      const filled = ad.data && Array.isArray(ad.data.ads) ? ad.data.ads[0] : null;
+      if (ad.status === 200 && filled) {
+        const provider = filled.provider || ad.data.provider || "gravity";
+        // zeroclick: report impressionIds to the zeroclick endpoint first (no
+        // Freebuff auth on that domain), then fall through to the local impression.
+        if (provider === "zeroclick" && Array.isArray(filled.impressionIds) && filled.impressionIds.length > 0) {
+          try {
+            await fetch(ZEROCLICK_IMPRESSIONS_URL, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ids: filled.impressionIds.map(String) }),
+              signal: AbortSignal.timeout(6000),
+            });
+          } catch (e) { failures.push("zeroclick:" + String(e && e.message || e).slice(0, 80)); }
+        }
+        if (filled.impUrl) {
+          await enqueueUp("POST", "/api/v1/ads/impression", token,
+            { impUrl: filled.impUrl, mode: "free", userAgent: browserUa, os: device.os },
+            { "User-Agent": CLI_AD_UA, "Content-Type": "application/json" }, 6000);
+        }
       }
     } catch (e) { failures.push("ads:" + String(e && e.message || e).slice(0, 80)); }
   }
